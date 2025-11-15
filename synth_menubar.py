@@ -557,65 +557,16 @@ class SynthMenuBar(rumps.App):
             quit_button=None
         )
         
-        # Menu items (keeping for right-click or additional options)
-        self.menu = [
-            rumps.MenuItem("Quick Analyze", callback=self.quick_analyze),
-            rumps.MenuItem("Screenshot + Analyze", callback=self.screenshot_analyze),
-            rumps.separator,
-            rumps.MenuItem("About Synth", callback=self.show_about),
-            rumps.separator,
-            rumps.MenuItem("Quit", callback=self.quit_app)
-        ]
+        # Empty menu - we'll handle clicks directly
+        self.menu.clear()
         
         # Initialize Qt app for floating panel
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
         self.panel = FloatingPanel()
-        
-        # Override the default click behavior to open panel directly
-        self.title = "Synth"
     
-    @rumps.clicked("Synth")
-    def title_clicked(self, _):
-        """When clicking the title/icon, open the panel directly"""
+    def menu_open(self):
+        """Called when menu bar item is clicked - open panel instead of showing menu"""
         self.panel.show_panel()
-        
-    def quick_analyze(self, _):
-        """Quick clipboard analysis"""
-        clipboard = pyperclip.paste()
-        if clipboard:
-            self.panel.detected_context = clipboard
-            self.panel.query_input.setText("Analyze and explain this")
-            self.panel.show_panel()
-            self.panel.process_query()
-        else:
-            rumps.alert("Clipboard Empty", "Copy something first, then try Quick Analyze")
-    
-    def screenshot_analyze(self, _):
-        """Take screenshot and analyze"""
-        self.panel.show_panel()
-        self.panel.analyze_screen()
-        
-    def show_about(self, _):
-        """Show about dialog"""
-        rumps.alert(
-            "Synth - AI Assistant",
-            "Your intelligent macOS companion\n\n"
-            "Version: 2.0.0\n"
-            "Author: Sushant Sharma\n\n"
-            "Features:\n"
-            "• Siri-like natural language interface\n"
-            "• AI-powered analysis (Ollama)\n"
-            "• 8 intelligent plugins\n"
-            "• Smart context detection\n"
-            "• OCR & screenshot analysis\n\n"
-            "Usage:\n"
-            "Click 'Open Synth' or use the menu bar icon\n"
-            "Type what you want, or use Quick Actions"
-        )
-    
-    def quit_app(self, _):
-        """Quit the application"""
-        rumps.quit_application()
 
 
 def main():
