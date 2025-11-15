@@ -54,55 +54,21 @@ class SynthMenuBarNative(NSObject):
         """Create custom view with embedded text field and result area"""
         from AppKit import NSTextView, NSScrollView, NSMakeSize, NSBorderlessWindowMask
         
-        # Container view - will expand based on content
-        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 100))
+        # Container view - starts tall enough for all elements
+        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 150))
         self.input_view.setWantsLayer_(True)
         
-        # Text field - highly visible with cursor
-        self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(15, 60, 225, 30))
-        self.text_field.setPlaceholderString_("Ask Synth anything...")
-        self.text_field.setTarget_(self)
-        self.text_field.setAction_("handleQuery:")
-        self.text_field.setEditable_(True)
-        self.text_field.setSelectable_(True)
-        self.text_field.setBezeled_(True)
-        self.text_field.setBezelStyle_(1)  # Square bezel
-        self.text_field.setDrawsBackground_(True)
-
-        # Light background with DARK text for better cursor visibility
-        self.text_field.setBackgroundColor_(NSColor.whiteColor())
-        self.text_field.setTextColor_(NSColor.blackColor())
-        self.text_field.setFont_(NSFont.systemFontOfSize_(14))
-
-        # Force cursor to show
-        self.text_field.setFocusRingType_(1)  # Show focus ring
-
-        # Ask button
-        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(245, 60, 60, 30))
-        self.ask_button.setTitle_("Ask")
-        self.ask_button.setBezelStyle_(1)
-        self.ask_button.setTarget_(self)
-        self.ask_button.setAction_("handleQuery:")
-        self.ask_button.setKeyEquivalent_("\r")  # Enter key
-        
-        # Clear button
-        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(310, 60, 75, 30))
-        self.clear_button.setTitle_("Clear")
-        self.clear_button.setBezelStyle_(1)
-        self.clear_button.setTarget_(self)
-        self.clear_button.setAction_("clearResults:")
-        
-        # Result text view (scrollable, expandable)
-        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(15, 15, 370, 40))
+        # Result text view FIRST (at top, will expand downward)
+        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(15, 60, 370, 80))
         scroll_view.setBorderType_(1)  # Line border
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setAutoresizingMask_(2)  # Width sizable
         
-        self.result_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 370, 40))
+        self.result_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 370, 80))
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
-        self.result_view.setFont_(NSFont.systemFontOfSize_(14))
+        self.result_view.setFont_(NSFont.systemFontOfSize_(13))
         
         # Dark background with BRIGHT white text for excellent contrast
         self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.17, 1.0))
@@ -115,15 +81,47 @@ class SynthMenuBarNative(NSObject):
         self.result_view.setString_("")
         
         scroll_view.setDocumentView_(self.result_view)
+        self.scroll_view = scroll_view
         
-        # Add to view
+        # Text field BELOW result area (always visible at bottom)
+        self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(15, 20, 220, 30))
+        self.text_field.setPlaceholderString_("Ask Synth anything...")
+        self.text_field.setTarget_(self)
+        self.text_field.setAction_("handleQuery:")
+        self.text_field.setEditable_(True)
+        self.text_field.setSelectable_(True)
+        self.text_field.setBezeled_(True)
+        self.text_field.setBezelStyle_(1)  # Square bezel
+        self.text_field.setDrawsBackground_(True)
+
+        # Light background with DARK text for better cursor visibility
+        self.text_field.setBackgroundColor_(NSColor.whiteColor())
+        self.text_field.setTextColor_(NSColor.blackColor())
+        self.text_field.setFont_(NSFont.systemFontOfSize_(13))
+
+        # Force cursor to show
+        self.text_field.setFocusRingType_(1)  # Show focus ring
+
+        # Ask button - ALWAYS VISIBLE at bottom
+        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(240, 20, 55, 30))
+        self.ask_button.setTitle_("Ask")
+        self.ask_button.setBezelStyle_(1)
+        self.ask_button.setTarget_(self)
+        self.ask_button.setAction_("handleQuery:")
+        self.ask_button.setKeyEquivalent_("\r")  # Enter key
+        
+        # Clear button - ALWAYS VISIBLE at bottom
+        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(300, 20, 85, 30))
+        self.clear_button.setTitle_("Clear")
+        self.clear_button.setBezelStyle_(1)
+        self.clear_button.setTarget_(self)
+        self.clear_button.setAction_("clearResults:")
+        
+        # Add to view - result area on top, controls at bottom
+        self.input_view.addSubview_(scroll_view)
         self.input_view.addSubview_(self.text_field)
         self.input_view.addSubview_(self.ask_button)
         self.input_view.addSubview_(self.clear_button)
-        self.input_view.addSubview_(scroll_view)
-        
-        # Store scroll view reference
-        self.scroll_view = scroll_view
         
         # Initially hide result view
         self.scroll_view.setHidden_(True)
@@ -155,8 +153,8 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setStringValue_("")
         self.text_field.setEditable_(True)
         
-        # Reset to default height
-        self.input_view.setFrame_(NSMakeRect(0, 0, 400, 100))
+        # Reset to compact height (just controls visible)
+        self.input_view.setFrame_(NSMakeRect(0, 0, 400, 60))
         
         # Focus back on text field so user can type immediately
         try:
@@ -174,10 +172,9 @@ class SynthMenuBarNative(NSObject):
         # Show result area and loading message
         self.scroll_view.setHidden_(False)
         self.safe_update_result("🧠 Thinking...")
-        self.expand_view_for_content(50)
+        self.expand_view_for_content(100)
         
-        # Check for screen analysis -- be conservative to avoid accidental triggers
-        # Only trigger when user explicitly mentions "on screen" or "analyze screen"
+        # Check for screen analysis - KEEP TEXT VISIBLE during analysis
         ql = query.lower()
         screen_triggers = ['on screen', 'analyze screen', 'on my screen', 'from screen', 'email on screen', 'mail on screen']
         if any(trigger in ql for trigger in screen_triggers):
@@ -185,24 +182,23 @@ class SynthMenuBarNative(NSObject):
             # DON'T clear text field so user can see their query
             self.analyze_screen_with_query(query)
         else:
-            # Clear text field for regular queries
+            # For regular queries, clear text field after reading
             self.text_field.setStringValue_("")
             self.process_query(query)
     
     def expand_view_for_content(self, content_height):
-        """Expand the view to fit content"""
+        """Expand the view to fit content - KEEPS CONTROLS AT BOTTOM"""
         from AppKit import NSMakeRect
         
-        # Calculate new height (min 100, max 400)
-        new_height = min(400, max(100, content_height + 95))
+        # Calculate new total height (controls=60, result area grows)
+        result_height = min(300, max(80, content_height))
+        new_total_height = result_height + 70  # 60 for controls + 10 padding
         
-        # Resize scroll view
-        scroll_height = new_height - 95
-        self.scroll_view.setFrame_(NSMakeRect(15, 15, 370, scroll_height))
+        # Resize scroll view (result area)
+        self.scroll_view.setFrame_(NSMakeRect(15, 60, 370, result_height))
         
         # Resize container
-        frame = self.input_view.frame()
-        self.input_view.setFrame_(NSMakeRect(frame.origin.x, frame.origin.y, 400, new_height))
+        self.input_view.setFrame_(NSMakeRect(0, 0, 400, new_total_height))
     
     def process_query(self, query):
         """Process regular query and show in dropdown - runs in background"""
@@ -250,7 +246,9 @@ class SynthMenuBarNative(NSObject):
         """Update result view on the main thread (selector method - note the trailing underscore)."""
         try:
             self.result_view.setString_(text)
-            text_height = len(text) / 2
+            # Calculate height based on text length (optimized)
+            line_count = text.count('\n') + 1
+            text_height = max(80, min(300, line_count * 20))
             self.expand_view_for_content(text_height)
         except Exception:
             pass
@@ -266,9 +264,9 @@ class SynthMenuBarNative(NSObject):
         
         def capture_and_analyze():
             try:
-                # Show countdown - ALL UI updates must go through safe_update_result!
+                # Show countdown - shorter messages to reduce lag
                 for i in range(2, 0, -1):
-                    self.safe_update_result(f"📸 CAPTURING SCREEN IN {i} SECONDS...\n\nPlease wait...")
+                    self.safe_update_result(f"📸 Capturing in {i}s...")
                     time.sleep(1)
                 
                 screenshot_img = self.screen_capture.capture()
@@ -277,29 +275,28 @@ class SynthMenuBarNative(NSObject):
                     try:
                         import pytesseract
                         
-                        self.safe_update_result("🔍 READING SCREEN CONTENT...\n\nExtracting text from screenshot...")
+                        self.safe_update_result("🔍 Reading screen...")
                         extracted_text = pytesseract.image_to_string(screenshot_img)
                         
                         if extracted_text and len(extracted_text.strip()) > 10:
-                            self.safe_update_result(f"🧠 ANALYZING CONTENT...\n\nProcessing {len(extracted_text.split())} words...")
+                            self.safe_update_result(f"🧠 Analyzing ({len(extracted_text.split())} words)...")
                             
                             full_query = f"{query}\n\nScreen content:\n{extracted_text[:800]}"
 
-                            # Use FAST model for initial, quick response to avoid long blocking
-                            # The heavy analysis can be requested separately if user wants deeper review
+                            # Use FAST model for quick response
                             result = self.brain.ask(full_query, mode="fast")
                             
-                            # Show full result in dropdown
+                            # Show result
                             self.safe_update_result(result)
                             
                         else:
-                            self.safe_update_result("⚠️ NO TEXT DETECTED ON SCREEN\n\nTry opening a document or email with text content.")
+                            self.safe_update_result("⚠️ No text found on screen")
                     except ImportError:
-                        self.safe_update_result("❌ OCR NOT AVAILABLE\n\nPlease install pytesseract:\npip install pytesseract")
+                        self.safe_update_result("❌ OCR not available\n\nInstall: pip install pytesseract")
                 else:
-                    self.safe_update_result("❌ SCREENSHOT FAILED\n\nUnable to capture screen content.")
+                    self.safe_update_result("❌ Screenshot failed")
             except Exception as e:
-                self.safe_update_result(f"❌ ERROR\n\n{str(e)}")
+                self.safe_update_result(f"❌ Error: {str(e)}")
         
         # Run EVERYTHING in background thread - no freezing!
         thread = threading.Thread(target=capture_and_analyze)
