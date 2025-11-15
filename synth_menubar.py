@@ -19,9 +19,9 @@ from pathlib import Path
 from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QLabel, QListWidget, QListWidgetItem,
-                             QPushButton, QTextEdit, QScrollArea)
+                             QPushButton, QTextEdit, QScrollArea, QMenu)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QFont, QColor, QPalette
+from PyQt6.QtGui import QFont, QColor, QPalette, QAction
 
 # Add project paths
 project_root = Path(__file__).parent
@@ -61,8 +61,8 @@ class FloatingPanel(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Larger size for Siri-like interface (starts compact)
-        self.setGeometry(100, 100, 700, 450)
+        # Compact starting size (expands as needed)
+        self.setGeometry(100, 100, 680, 400)
         self.hide()  # Start hidden, only show when user clicks menu
         
         # Main widget
@@ -75,22 +75,21 @@ class FloatingPanel(QMainWindow):
         """)
         self.setCentralWidget(main_widget)
         
-        # Main horizontal layout
-        main_layout = QHBoxLayout()
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
+        # Main vertical layout (clean, no sidebars)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 15, 20, 20)
+        main_layout.setSpacing(12)
         
-        # Left side - Main input area
-        left_layout = QVBoxLayout()
-        left_layout.setSpacing(15)
+        # Top bar with title and menu button
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(10)
         
-        # Siri-like orb/title
-        title_container = QHBoxLayout()
+        # Siri-like orb + title
         orb_label = QLabel("🧠")
         orb_label.setStyleSheet("""
             QLabel {
                 color: white;
-                font-size: 40px;
+                font-size: 32px;
                 background: transparent;
             }
         """)
@@ -98,31 +97,52 @@ class FloatingPanel(QMainWindow):
         title_label.setStyleSheet("""
             QLabel {
                 color: white;
-                font-size: 24px;
+                font-size: 20px;
                 font-weight: 300;
                 background: transparent;
             }
         """)
-        title_container.addWidget(orb_label)
-        title_container.addWidget(title_label)
-        title_container.addStretch()
-        left_layout.addLayout(title_container)
         
-        # Context detection label (shows what Synth sees)
-        self.context_label = QLabel("Analyzing screen context...")
+        top_bar.addWidget(orb_label)
+        top_bar.addWidget(title_label)
+        top_bar.addStretch()
+        
+        # Three-dot menu button
+        self.menu_btn = QPushButton("⋯")
+        self.menu_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(60, 60, 70, 150);
+                color: white;
+                border: none;
+                border-radius: 15px;
+                padding: 5px 15px;
+                font-size: 24px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(80, 80, 100, 200);
+            }
+        """)
+        self.menu_btn.clicked.connect(self.show_quick_actions_menu)
+        top_bar.addWidget(self.menu_btn)
+        
+        main_layout.addLayout(top_bar)
+        
+        # Context detection label
+        self.context_label = QLabel("� Ask me anything...")
         self.context_label.setStyleSheet("""
             QLabel {
                 color: rgba(150, 150, 255, 200);
-                font-size: 12px;
+                font-size: 11px;
                 background: transparent;
-                padding: 5px;
+                padding: 3px;
                 font-style: italic;
             }
         """)
         self.context_label.setWordWrap(True)
-        left_layout.addWidget(self.context_label)
+        main_layout.addWidget(self.context_label)
         
-        # Main query input (Siri-like)
+        # Main query input (large, expandable)
         self.query_input = QTextEdit()
         self.query_input.setPlaceholderText("What would you like me to do?")
         self.query_input.setStyleSheet("""
@@ -132,75 +152,35 @@ class FloatingPanel(QMainWindow):
                 border: none;
                 border-radius: 12px;
                 padding: 15px;
-                font-size: 16px;
+                font-size: 15px;
                 font-weight: 300;
+                line-height: 1.4;
             }
             QTextEdit:focus {
                 background-color: rgba(50, 50, 60, 200);
             }
         """)
-        self.query_input.setMaximumHeight(120)
-        left_layout.addWidget(self.query_input)
+        self.query_input.setMinimumHeight(80)
+        self.query_input.setMaximumHeight(150)
+        main_layout.addWidget(self.query_input)
         
-        # Example prompts
-        examples_label = QLabel("💡 Try: \"Draft an email about...\" or \"Analyze this code\" or \"What's on screen?\"")
-        examples_label.setStyleSheet("""
-            QLabel {
-                color: rgba(120, 120, 130, 180);
-                font-size: 11px;
-                background: transparent;
-                padding: 5px;
-            }
-        """)
-        examples_label.setWordWrap(True)
-        left_layout.addWidget(examples_label)
+        # Quick action buttons (bottom of input)
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
         
-        # Response display
-        response_label = QLabel("Response:")
-        response_label.setStyleSheet("""
-            QLabel {
-                color: rgba(180, 180, 200, 200);
-                font-size: 12px;
-                background: transparent;
-                font-weight: bold;
-            }
-        """)
-        left_layout.addWidget(response_label)
-        
-        self.result_display = QTextEdit()
-        self.result_display.setReadOnly(True)
-        self.result_display.setStyleSheet("""
-            QTextEdit {
-                background-color: rgba(30, 30, 40, 150);
-                color: rgba(100, 200, 255, 255);
-                border: 1px solid rgba(70, 70, 90, 100);
-                border-radius: 10px;
-                padding: 12px;
-                font-size: 13px;
-                line-height: 1.5;
-            }
-        """)
-        left_layout.addWidget(self.result_display)
-        
-        # Bottom controls
-        bottom_controls = QHBoxLayout()
-        
-        analyze_btn = QPushButton("✨ Analyze (⏎)")
+        analyze_btn = QPushButton("✨ Ask")
         analyze_btn.setStyleSheet("""
             QPushButton {
                 background-color: rgba(74, 144, 226, 200);
                 color: white;
                 border: none;
                 border-radius: 8px;
-                padding: 12px 24px;
-                font-size: 14px;
+                padding: 10px 20px;
+                font-size: 13px;
                 font-weight: 500;
             }
             QPushButton:hover {
                 background-color: rgba(94, 164, 246, 230);
-            }
-            QPushButton:pressed {
-                background-color: rgba(54, 124, 206, 200);
             }
         """)
         analyze_btn.clicked.connect(self.process_query)
@@ -208,72 +188,64 @@ class FloatingPanel(QMainWindow):
         clear_btn = QPushButton("Clear")
         clear_btn.setStyleSheet("""
             QPushButton {
-                background-color: rgba(60, 60, 70, 150);
+                background-color: rgba(60, 60, 70, 120);
                 color: rgba(200, 200, 210, 200);
                 border: none;
                 border-radius: 8px;
-                padding: 12px 20px;
-                font-size: 13px;
+                padding: 10px 16px;
+                font-size: 12px;
             }
             QPushButton:hover {
-                background-color: rgba(80, 80, 90, 180);
+                background-color: rgba(80, 80, 90, 150);
             }
         """)
         clear_btn.clicked.connect(self.clear_all)
         
-        close_btn = QPushButton("✕")
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: rgba(200, 200, 210, 150);
-                border: none;
-                padding: 10px 15px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                color: rgba(255, 100, 100, 200);
-            }
-        """)
-        close_btn.clicked.connect(self.hide)
+        button_row.addWidget(analyze_btn)
+        button_row.addWidget(clear_btn)
+        button_row.addStretch()
         
-        bottom_controls.addWidget(analyze_btn)
-        bottom_controls.addWidget(clear_btn)
-        bottom_controls.addStretch()
-        bottom_controls.addWidget(close_btn)
+        main_layout.addLayout(button_row)
         
-        left_layout.addLayout(bottom_controls)
-        
-        # Right side - Quick Actions Panel
-        right_layout = QVBoxLayout()
-        right_layout.setSpacing(10)
-        
-        actions_title = QLabel("Quick Actions")
-        actions_title.setStyleSheet("""
+        # Separator
+        separator = QLabel()
+        separator.setStyleSheet("""
             QLabel {
-                color: white;
-                font-size: 13px;
-                font-weight: bold;
-                background: transparent;
-                padding: 5px;
+                background-color: rgba(70, 70, 80, 100);
+                min-height: 1px;
+                max-height: 1px;
             }
         """)
-        right_layout.addWidget(actions_title)
+        main_layout.addWidget(separator)
         
-        # Action buttons with icons
-        self.create_action_button("📧 Draft Email", self.draft_email, right_layout)
-        self.create_action_button("📝 Summarize", self.summarize_content, right_layout)
-        self.create_action_button("💻 Explain Code", self.explain_code, right_layout)
-        self.create_action_button("🔍 Web Search", self.web_search, right_layout)
-        self.create_action_button("📅 Add to Calendar", self.add_calendar, right_layout)
-        self.create_action_button("🔐 Security Check", self.security_check, right_layout)
-        self.create_action_button("📊 Analyze Screen", self.analyze_screen, right_layout)
-        self.create_action_button("🎨 Get Creative", self.creative_mode, right_layout)
+        # Response area (expands dynamically)
+        response_header = QLabel("Response:")
+        response_header.setStyleSheet("""
+            QLabel {
+                color: rgba(180, 180, 200, 200);
+                font-size: 11px;
+                background: transparent;
+                font-weight: bold;
+                padding: 5px 0;
+            }
+        """)
+        main_layout.addWidget(response_header)
         
-        right_layout.addStretch()
-        
-        # Add both sides to main layout
-        main_layout.addLayout(left_layout, 2)  # Left takes 2/3
-        main_layout.addLayout(right_layout, 1)  # Right takes 1/3
+        self.result_display = QTextEdit()
+        self.result_display.setReadOnly(True)
+        self.result_display.setStyleSheet("""
+            QTextEdit {
+                background-color: rgba(30, 30, 40, 100);
+                color: rgba(220, 220, 240, 255);
+                border: none;
+                border-radius: 10px;
+                padding: 15px;
+                font-size: 13px;
+                line-height: 1.6;
+            }
+        """)
+        self.result_display.setMinimumHeight(150)
+        main_layout.addWidget(self.result_display)
         
         main_widget.setLayout(main_layout)
         
@@ -282,30 +254,45 @@ class FloatingPanel(QMainWindow):
         self.detect_timer.timeout.connect(self.auto_detect_context)
         self.detect_timer.start(2000)  # Check every 2 seconds
     
-    def create_action_button(self, text, callback, layout):
-        """Create a styled action button"""
-        btn = QPushButton(text)
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(50, 50, 60, 150);
+    def show_quick_actions_menu(self):
+        """Show popup menu with Quick Actions"""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: rgba(40, 40, 50, 250);
                 color: white;
-                border: 1px solid rgba(80, 80, 100, 100);
+                border: 1px solid rgba(80, 80, 100, 150);
                 border-radius: 8px;
-                padding: 10px 15px;
-                font-size: 12px;
-                text-align: left;
+                padding: 5px;
             }
-            QPushButton:hover {
-                background-color: rgba(70, 70, 90, 200);
-                border: 1px solid rgba(100, 150, 255, 150);
+            QMenu::item {
+                padding: 10px 30px 10px 10px;
+                border-radius: 5px;
             }
-            QPushButton:pressed {
-                background-color: rgba(90, 90, 110, 220);
+            QMenu::item:selected {
+                background-color: rgba(74, 144, 226, 200);
             }
         """)
-        btn.clicked.connect(callback)
-        layout.addWidget(btn)
-        return btn
+        
+        # Add Quick Actions to menu
+        actions = [
+            ("📧 Draft Email", self.draft_email),
+            ("📝 Summarize", self.summarize_content),
+            ("💻 Explain Code", self.explain_code),
+            ("🔍 Web Search", self.web_search),
+            ("📅 Add to Calendar", self.add_calendar),
+            ("🔐 Security Check", self.security_check),
+            ("📊 Analyze Screen", self.analyze_screen),
+            ("🎨 Get Creative", self.creative_mode),
+        ]
+        
+        for text, callback in actions:
+            action = QAction(text, self)
+            action.triggered.connect(callback)
+            menu.addAction(action)
+        
+        # Show menu below the button
+        menu.exec(self.menu_btn.mapToGlobal(self.menu_btn.rect().bottomLeft()))
     
     def auto_detect_context(self):
         """Auto-detect context from clipboard (optional, not forced)"""
@@ -366,10 +353,13 @@ class FloatingPanel(QMainWindow):
             self.result_display.setText(f"❌ Error: {str(e)}")
     
     def adjust_window_size(self, content_length):
-        """Dynamically adjust window height based on content"""
-        base_height = 450
+        """Dynamically adjust window height based on content - smooth expansion"""
+        base_height = 400  # Compact starting size
         
-        if content_length > 1000:
+        # Calculate needed height based on content
+        if content_length > 2000:
+            new_height = min(800, QApplication.primaryScreen().geometry().height() - 150)
+        elif content_length > 1000:
             new_height = 700
         elif content_length > 500:
             new_height = 600
@@ -378,9 +368,16 @@ class FloatingPanel(QMainWindow):
         else:
             new_height = base_height
         
-        # Smooth resize
+        # Smooth resize with animation
         current_geom = self.geometry()
-        self.setGeometry(current_geom.x(), current_geom.y(), 700, new_height)
+        if abs(current_geom.height() - new_height) > 50:  # Only animate significant changes
+            self.setGeometry(current_geom.x(), current_geom.y(), 680, new_height)
+            
+            # Adjust result display height proportionally
+            if new_height > 500:
+                self.result_display.setMinimumHeight(new_height - 300)
+            else:
+                self.result_display.setMinimumHeight(150)
     
     def clear_all(self):
         """Clear all inputs and outputs"""
@@ -518,11 +515,12 @@ class FloatingPanel(QMainWindow):
         """Show panel at cursor position with animation"""
         # Position near top center (like Siri/Spotlight)
         screen = QApplication.primaryScreen().geometry()
-        x = (screen.width() - self.width()) // 2  # Center horizontally
+        x = (screen.width() - 680) // 2  # Center horizontally
         y = 80  # Near top
         
         # Reset to compact size when opening
-        self.setGeometry(x, y, 700, 450)
+        self.setGeometry(x, y, 680, 400)
+        self.result_display.setMinimumHeight(150)
         
         self.move(x, y)
         self.show()
