@@ -32,7 +32,7 @@ def main():
     
     try:
         # Run menu bar app
-        subprocess.run([sys.executable, "synth_menubar.py"], env=env)
+        subprocess.run(["python3", "synth_menubar.py"], env=env)
     except KeyboardInterrupt:
         print("\n\n👋 Synth stopped. Goodbye!")
     except Exception as e:

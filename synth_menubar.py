@@ -293,8 +293,7 @@ class SynthMenuBar(rumps.App):
     
     def __init__(self):
         super().__init__(
-            "Synth",
-            icon="🧠",  # Brain emoji as icon
+            "🧠",  # Shows brain emoji as title
             quit_button=None
         )
         
