@@ -70,6 +70,15 @@ class SynthMenuBarNative(NSObject):
         self.result_view.setRichText_(False)
         self.result_view.setFont_(NSFont.systemFontOfSize_(13))
         
+        # Enable text selection and copying
+        self.result_view.setAllowsUndo_(False)
+        try:
+            # Enable context menu for copy/paste
+            self.result_view.setUsesFontPanel_(False)
+            self.result_view.setUsesRuler_(False)
+        except:
+            pass
+        
         # Dark background with BRIGHT white text for excellent contrast
         self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.17, 1.0))
         try:
@@ -94,13 +103,19 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setBezelStyle_(1)  # Square bezel
         self.text_field.setDrawsBackground_(True)
 
-        # Light background with DARK text for better cursor visibility
-        self.text_field.setBackgroundColor_(NSColor.whiteColor())
-        self.text_field.setTextColor_(NSColor.blackColor())
+        # BRIGHT WHITE background with BLACK text for perfect cursor visibility
+        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 1.0))
+        self.text_field.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.0, 0.0, 0.0, 1.0))
         self.text_field.setFont_(NSFont.systemFontOfSize_(13))
 
-        # Force cursor to show
+        # Force cursor to show - make it visible!
         self.text_field.setFocusRingType_(1)  # Show focus ring
+        
+        # Enable text insertion point (cursor)
+        try:
+            self.text_field.cell().setUsesSingleLineMode_(True)
+        except:
+            pass
 
         # Ask button - ALWAYS VISIBLE at bottom
         self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(240, 20, 55, 30))
