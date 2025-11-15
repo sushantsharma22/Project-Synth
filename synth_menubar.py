@@ -52,13 +52,13 @@ class FloatingPanel(QMainWindow):
         
     def init_ui(self):
         """Setup the Siri-like floating panel UI"""
-        # Window settings - behaves like menu dropdown
+        # Window settings - stays on top but doesn't auto-close
         self.setWindowTitle("Synth")
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Tool |
-            Qt.WindowType.Popup  # Makes it behave like a dropdown menu
+            Qt.WindowType.Tool
+            # Removed Popup flag - it was causing the window to close when clicking inside
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
@@ -107,6 +107,26 @@ class FloatingPanel(QMainWindow):
         top_bar.addWidget(orb_label)
         top_bar.addWidget(title_label)
         top_bar.addStretch()
+        
+        # Close button (×)
+        close_btn = QPushButton("×")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: rgba(255, 255, 255, 150);
+                border: none;
+                border-radius: 15px;
+                padding: 0px 10px;
+                font-size: 28px;
+                font-weight: 300;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 60, 60, 200);
+                color: white;
+            }
+        """)
+        close_btn.clicked.connect(self.hide)
+        top_bar.addWidget(close_btn)
         
         # Three-dot menu button
         self.menu_btn = QPushButton("⋯")
@@ -320,10 +340,11 @@ class FloatingPanel(QMainWindow):
             self.result_display.setText("💬 Please type what you'd like me to do...")
             return
         
-        # Check if user wants screen analysis
-        if any(word in query.lower() for word in ['screen', 'on my screen', 'what do you see', 'analyze screen']):
+        # Check if user wants screen analysis - improved keyword detection
+        screen_keywords = ['screen', 'window', 'display', 'going on', 'what do you see', 'analyze screen', 'on my screen', 'see on my']
+        if any(keyword in query.lower() for keyword in screen_keywords):
             # User wants actual screen analysis, not clipboard
-            self.result_display.setText("� Capturing screen for analysis...")
+            self.result_display.setText("📸 Capturing your screen for analysis...\n\nWindow will hide in 2 seconds!")
             QApplication.processEvents()
             self.analyze_screen()
             return
@@ -510,20 +531,7 @@ class FloatingPanel(QMainWindow):
             if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
                 self.process_query()
     
-    def focusOutEvent(self, event):
-        """Hide panel when clicking outside (like a menu)"""
-        # Don't hide if clicking on our own menu
-        if event.reason() != Qt.FocusReason.PopupFocusReason:
-            # Small delay to allow menu interactions
-            QTimer.singleShot(100, self.check_and_hide)
-        super().focusOutEvent(event)
-    
-    def check_and_hide(self):
-        """Check if we should hide the panel"""
-        # Only hide if not actively typing or if a menu is open
-        if not self.query_input.hasFocus() and not self.result_display.hasFocus():
-            # Don't hide immediately, give a small grace period
-            pass  # Removed auto-hide for better UX
+    # Removed focusOutEvent and check_and_hide - they were causing the window to close unexpectedly
     
     def show_panel(self):
         """Show panel directly under menu bar icon like a dropdown"""
@@ -557,15 +565,17 @@ class SynthMenuBar(rumps.App):
             quit_button=None
         )
         
-        # Empty menu - we'll handle clicks directly
-        self.menu.clear()
-        
         # Initialize Qt app for floating panel
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
         self.panel = FloatingPanel()
+        
+        # Minimal menu - just a space character to make it clickable
+        # When user clicks anywhere in the dropdown, it opens the panel
+        self.menu = [" "]
     
-    def menu_open(self):
-        """Called when menu bar item is clicked - open panel instead of showing menu"""
+    @rumps.clicked(" ")
+    def open_panel(self, _):
+        """Opens the Synth text panel directly"""
         self.panel.show_panel()
 
 
