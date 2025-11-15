@@ -71,67 +71,86 @@ class SynthMenuBarNative(NSObject):
         self.text_delegate = TextFieldDelegate.alloc().init()
         self.text_delegate.parent = self
         
-        # Container view - starts tall enough for all elements
-        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 150))
+        # Container view - compact and professional
+        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 300))
         self.input_view.setWantsLayer_(True)
         
-        # Result text view FIRST (at top, will expand downward)
-        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(15, 60, 370, 80))
-        scroll_view.setBorderType_(1)  # Line border
+        # Result text view FIRST (at top) - GLASSMORPHISM with MORE space
+        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 60, 430, 230))
+        scroll_view.setBorderType_(0)  # No border for clean look
+        scroll_view.setDrawsBackground_(False)  # Transparent scroll view
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setAutoresizingMask_(2)  # Width sizable
         
-        self.result_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 370, 80))
+        self.result_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 415, 230))
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
-        self.result_view.setFont_(NSFont.systemFontOfSize_(13))
+        self.result_view.setFont_(NSFont.systemFontOfSize_(12))
         
-        # Enable text selection and copying
-        self.result_view.setAllowsUndo_(False)
+        # GLASSMORPHISM - Apple-style semi-transparent with better visibility
+        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.70))
+        self.result_view.setTextColor_(NSColor.whiteColor())  # Pure white text
+        
+        # Rounded corners for macOS look!
         try:
-            # Enable context menu for copy/paste
-            self.result_view.setUsesFontPanel_(False)
-            self.result_view.setUsesRuler_(False)
+            self.result_view.setWantsLayer_(True)
+            self.result_view.layer().setCornerRadius_(12.0)
+            self.result_view.layer().setMasksToBounds_(True)
         except:
             pass
         
-        # Dark background with BRIGHT white text for excellent contrast
-        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.17, 1.0))
+        # Enable text selection and copying with CMD+C
+        self.result_view.setAllowsUndo_(False)
+        self.result_view.setUsesFindBar_(True)
         try:
-            # Use bright white for maximum visibility
-            self.result_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.98, 0.98, 1.0, 1.0))
-        except Exception:
-            # Fallback
-            self.result_view.setTextColor_(NSColor.whiteColor())
-        self.result_view.setString_("")
+            self.result_view.setUsesFontPanel_(False)
+            self.result_view.setUsesRuler_(False)
+            # Word wrap and padding
+            self.result_view.textContainer().setWidthTracksTextView_(True)
+            self.result_view.textContainer().setContainerSize_(NSMakeSize(415, 10000))
+            self.result_view.textContainer().setLineFragmentPadding_(10.0)
+        except:
+            pass
+        
+        self.result_view.setString_("Ready... Ask me anything!")
         
         scroll_view.setDocumentView_(self.result_view)
         self.scroll_view = scroll_view
         
-        # Text input - use NSTextView for better cursor visibility and auto-expanding
-        text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(15, 20, 220, 30))
-        text_scroll.setBorderType_(1)  # Line border
+        # Text input - NSTextView with VISIBLE CURSOR and better styling
+        text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 15, 260, 35))
+        text_scroll.setBorderType_(0)  # No border for clean look
+        text_scroll.setDrawsBackground_(False)  # Transparent scroll view
         text_scroll.setHasVerticalScroller_(False)
         text_scroll.setHasHorizontalScroller_(False)
         
-        self.text_field = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 220, 30))
+        self.text_field = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 260, 35))
         self.text_field.setEditable_(True)
         self.text_field.setSelectable_(True)
         self.text_field.setRichText_(False)
-        self.text_field.setFont_(NSFont.systemFontOfSize_(13))
+        self.text_field.setFont_(NSFont.systemFontOfSize_(14))
         
-        # DARK THEME - match the rest of the UI with semi-transparent dark background
-        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.2, 0.22, 0.95))
-        self.text_field.setTextColor_(NSColor.whiteColor())
-        self.text_field.setInsertionPointColor_(NSColor.whiteColor())  # WHITE cursor for dark theme!
+        # GLASSMORPHISM - Apple style, lighter for better cursor visibility
+        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.18, 0.18, 0.20, 0.70))
+        self.text_field.setTextColor_(NSColor.whiteColor())  # Pure white text
+        self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 1.0))  # BRIGHT WHITE cursor!
         
-        # Enable word wrap for long text
+        # Rounded corners!
+        try:
+            self.text_field.setWantsLayer_(True)
+            self.text_field.layer().setCornerRadius_(10.0)
+            self.text_field.layer().setMasksToBounds_(True)
+        except:
+            pass
+        
+        # Enable word wrap and proper sizing
         self.text_field.setHorizontallyResizable_(False)
         self.text_field.setVerticallyResizable_(True)
         try:
             self.text_field.textContainer().setWidthTracksTextView_(True)
-            self.text_field.textContainer().setContainerSize_(NSMakeSize(220, 1000))
+            self.text_field.textContainer().setContainerSize_(NSMakeSize(260, 1000))
+            self.text_field.textContainer().setLineFragmentPadding_(8.0)  # Better padding
         except:
             pass
         
@@ -141,25 +160,28 @@ class SynthMenuBarNative(NSObject):
         # Set delegate to handle Enter key
         self.text_field.setDelegate_(self.text_delegate)
 
-        # Ask button - ALWAYS VISIBLE at bottom
-        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(240, 20, 45, 30))
+        # Buttons - FULL WIDTH so text shows completely!
+        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(275, 15, 55, 35))
         self.ask_button.setTitle_("Ask")
         self.ask_button.setBezelStyle_(1)
         self.ask_button.setTarget_(self)
         self.ask_button.setAction_("handleQuery:")
         self.ask_button.setKeyEquivalent_("\r")  # Enter key
+        self.ask_button.setFont_(NSFont.systemFontOfSize_(13))
         
-        # Copy button - Copy output to clipboard
-        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(290, 20, 45, 30))
+        # Copy button - Full text visible
+        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(335, 15, 55, 35))
         self.copy_button.setTitle_("Copy")
         self.copy_button.setBezelStyle_(1)
         self.copy_button.setTarget_(self)
         self.copy_button.setAction_("copyResults:")
+        self.copy_button.setFont_(NSFont.systemFontOfSize_(13))
         
-        # Clear button - ALWAYS VISIBLE at bottom
-        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(340, 20, 45, 30))
+        # Clear button - Full text visible
+        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(395, 15, 55, 35))
         self.clear_button.setTitle_("Clear")
         self.clear_button.setBezelStyle_(1)
+        self.clear_button.setFont_(NSFont.systemFontOfSize_(13))
         self.clear_button.setTarget_(self)
         self.clear_button.setAction_("clearResults:")
         
@@ -240,10 +262,10 @@ class SynthMenuBarNative(NSObject):
         screen_triggers = ['on screen', 'analyze screen', 'on my screen', 'from screen', 'email on screen', 'mail on screen']
         if any(trigger in ql for trigger in screen_triggers):
             # Run screen analysis (non-blocking)
-            # DON'T clear text field so user can see their query
+            # KEEP text field so user can see their query - DON'T CLEAR!
             self.analyze_screen_with_query(query)
         else:
-            # For regular queries, clear text field after reading
+            # For regular queries ONLY, clear text field after reading
             self.text_field.setString_("")
             self.process_query(query)
     
@@ -256,10 +278,10 @@ class SynthMenuBarNative(NSObject):
         new_total_height = result_height + 70  # 60 for controls + 10 padding
         
         # Resize scroll view (result area)
-        self.scroll_view.setFrame_(NSMakeRect(15, 60, 370, result_height))
+        self.scroll_view.setFrame_(NSMakeRect(10, 60, 430, result_height))
         
         # Resize container
-        self.input_view.setFrame_(NSMakeRect(0, 0, 400, new_total_height))
+        self.input_view.setFrame_(NSMakeRect(0, 0, 450, new_total_height))
     
     def process_query(self, query):
         """Process regular query and show in dropdown - runs in background"""
@@ -342,7 +364,15 @@ class SynthMenuBarNative(NSObject):
                         if extracted_text and len(extracted_text.strip()) > 10:
                             self.safe_update_result(f"🧠 Analyzing ({len(extracted_text.split())} words)...")
                             
-                            full_query = f"{query}\n\nScreen content:\n{extracted_text[:800]}"
+                            # SMART CONTEXT-AWARE PROMPT - Like GPT/Gemini, no hardcoding!
+                            # Just give the AI the user's request and screen content - let it figure out what to do
+                            full_query = f"""The user is looking at their screen and said: "{query}"
+
+Here's what's on their screen:
+
+{extracted_text[:4000]}
+
+Understand the user's intent from their request and the screen content, then provide a helpful response. Be natural, concise, and context-aware."""
 
                             # Use FAST model for quick response
                             result = self.brain.ask(full_query, mode="fast")
