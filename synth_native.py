@@ -8,7 +8,7 @@ from pathlib import Path
 from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem, 
                     NSTextField, NSButton, NSView, NSColor, NSFont,
                     NSNotificationCenter, NSUserNotification, NSUserNotificationCenter,
-                    NSTextView, NSScrollView, NSPasteboard)
+                    NSTextView, NSScrollView, NSPasteboard, NSApp)
 from Foundation import NSObject, NSMakeRect, NSMakeSize
 import objc
 
@@ -20,6 +20,40 @@ from brain_client import DeltaBrain
 from src.senses.screen_capture import ScreenCapture
 from src.plugins.plugin_manager import PluginManager
 from src.plugins.base_plugin import PluginContext
+
+
+class CopyableTextView(NSTextView):
+    """Custom NSTextView that properly handles copy/paste in menu bars"""
+    
+    def acceptsFirstResponder(self):
+        """Allow this view to become first responder"""
+        return True
+    
+    def copy_(self, sender):
+        """Explicit copy handler"""
+        selectedRange = self.selectedRange()
+        if selectedRange.length > 0:
+            selectedText = self.string()[selectedRange.location:selectedRange.location + selectedRange.length]
+        else:
+            selectedText = self.string()
+        
+        pasteboard = NSPasteboard.generalPasteboard()
+        pasteboard.clearContents()
+        pasteboard.setString_forType_(selectedText, "public.utf8-plain-text")
+        return True
+    
+    def paste_(self, sender):
+        """Explicit paste handler"""
+        pasteboard = NSPasteboard.generalPasteboard()
+        text = pasteboard.stringForType_("public.utf8-plain-text")
+        if text and self.isEditable():
+            self.insertText_(text)
+        return True
+    
+    def selectAll_(self, sender):
+        """Select all text"""
+        self.setSelectedRange_((0, len(self.string())))
+        return True
 
 
 class TextFieldDelegate(NSObject):
@@ -83,14 +117,15 @@ class SynthMenuBarNative(NSObject):
         self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 270))
         self.input_view.setWantsLayer_(True)
         
-        # Result text view at TOP
+        # Result text view at TOP - NOW WITH CopyableTextView class!
         scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 65, 480, 195))
         scroll_view.setBorderType_(0)
         scroll_view.setDrawsBackground_(False)
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setAutoresizingMask_(2)
         
-        self.result_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 465, 195))
+        # USE CUSTOM CopyableTextView INSTEAD OF NSTextView!
+        self.result_view = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 465, 195))
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
@@ -108,12 +143,10 @@ class SynthMenuBarNative(NSObject):
         except:
             pass
         
-        # CRITICAL: Enable CMD+C copying and selection!
+        # Enable copy operations - CRITICAL SETTINGS
         self.result_view.setAllowsUndo_(False)
-        self.result_view.setEditable_(False)
-        self.result_view.setSelectable_(True)
         
-        # Enable copy operations - disable substitutions
+        # Disable substitutions that interfere with copy/paste
         try:
             self.result_view.setAutomaticTextReplacementEnabled_(False)
             self.result_view.setAutomaticQuoteSubstitutionEnabled_(False)
@@ -122,6 +155,7 @@ class SynthMenuBarNative(NSObject):
         except:
             pass
         
+        # Text container settings
         try:
             self.result_view.setUsesFindBar_(True)
             self.result_view.setImportsGraphics_(False)
@@ -138,14 +172,15 @@ class SynthMenuBarNative(NSObject):
         scroll_view.setDocumentView_(self.result_view)
         self.scroll_view = scroll_view
         
-        # Text input ABOVE buttons now!
+        # Text input ABOVE buttons now! - ALSO USE CopyableTextView!
         text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 30, 480, 30))
         text_scroll.setBorderType_(0)
         text_scroll.setDrawsBackground_(False)
         text_scroll.setHasVerticalScroller_(False)
         text_scroll.setHasHorizontalScroller_(False)
         
-        self.text_field = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 480, 30))
+        # USE CUSTOM CopyableTextView FOR INPUT TOO!
+        self.text_field = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 480, 30))
         self.text_field.setEditable_(True)
         self.text_field.setSelectable_(True)
         self.text_field.setRichText_(False)
@@ -348,13 +383,13 @@ The plugin will automatically activate when relevant to your query."""
         
         # Focus back on text field so user can type immediately
         try:
-            self.text_field.window().makeFirstResponder_(self.text_field)
+            # Make the text field first responder when menu opens
+            NSApp.keyWindow().makeFirstResponder_(self.text_field)
         except:
             pass
     
     def copyResults_(self, sender):
-        """Copy the result text to clipboard"""
-        
+        """Copy the result text to clipboard - Enhanced version"""
         result_text = str(self.result_view.string())
         if result_text:
             # Get the general pasteboard
@@ -364,6 +399,29 @@ The plugin will automatically activate when relevant to your query."""
             
             # Show brief notification
             self.show_notification("Copied!", "", "Result copied to clipboard")
+            
+            # Also update button text temporarily
+            self.copy_button.setTitle_("✓ Copied!")
+            
+            # Reset button text after 1 second
+            import threading
+            def reset_button():
+                import time
+                time.sleep(1)
+                try:
+                    self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        "resetCopyButton:", None, False
+                    )
+                except:
+                    pass
+            
+            thread = threading.Thread(target=reset_button)
+            thread.daemon = True
+            thread.start()
+    
+    def resetCopyButton_(self, sender):
+        """Reset copy button text"""
+        self.copy_button.setTitle_("Copy")
     
     def screenWithQuery_(self, sender):
         """Auto-capture screen + use query - ONE CLICK!"""
