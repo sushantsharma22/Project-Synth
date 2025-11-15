@@ -405,7 +405,7 @@ The plugin will automatically activate when relevant to your query."""
         self.input_view.setFrame_(NSMakeRect(0, 0, 500, new_total_height))
     
     def process_query(self, query):
-        """Process regular query and show in dropdown - runs in background"""
+        """Process query - TRY PLUGINS FIRST, then Brain fallback"""
         import threading
         
         # Show loading immediately
@@ -413,14 +413,51 @@ The plugin will automatically activate when relevant to your query."""
         
         def process_in_background():
             try:
-                # Get response from Brain (this runs in background)
-                result = self.brain.ask(query, mode="fast")
+                # STEP 1: Try plugins first - use query as clipboard_text
+                from src.plugins.base_plugin import PluginContext
                 
-                # Update UI safely
-                self.safe_update_result(result)
+                context = PluginContext(
+                    clipboard_text=query,  # Treat query as clipboard text
+                    content_type="text"
+                )
+                
+                # Get plugin suggestions
+                suggestions = self.plugin_manager.get_suggestions(context)
+                
+                if suggestions:
+                    # EXECUTE TOP PLUGIN SUGGESTION
+                    top = suggestions[0]
+                    self.safe_update_result(f"🔌 {top.title}\n\n{top.description}")
+                    
+                    # Handle different action types
+                    if top.action_type == 'open_url':
+                        # Open URL in browser
+                        import webbrowser
+                        url = top.action_params.get('url')
+                        if url:
+                            webbrowser.open(url)
+                            self.safe_update_result(f"✅ {top.title}\n\n{top.description}\n\n🌐 Opening in browser...")
+                        else:
+                            self.safe_update_result(f"❌ No URL found in plugin action")
+                    
+                    elif top.action_type == 'draft_email':
+                        # Show email draft
+                        draft = top.action_params.get('draft', 'No draft available')
+                        self.safe_update_result(f"📧 {top.title}\n\n{draft}")
+                    
+                    else:
+                        # Generic action - just show description
+                        result = top.action_params.get('message', top.description)
+                        self.safe_update_result(f"✅ {top.title}\n\n{result}")
+                
+                else:
+                    # STEP 2: No plugin matched, use Brain
+                    result = self.brain.ask(query, mode="balanced")
+                    self.safe_update_result(result)
                 
             except Exception as e:
-                error_msg = f"❌ Error: {str(e)}"
+                import traceback
+                error_msg = f"❌ Error: {str(e)}\n\n{traceback.format_exc()}"
                 self.safe_update_result(error_msg)
         
         # Run in background thread so Mac doesn't freeze
@@ -485,27 +522,22 @@ The plugin will automatically activate when relevant to your query."""
                         if extracted_text and len(extracted_text.strip()) > 10:
                             self.safe_update_result(f"🧠 Analyzing ({len(extracted_text.split())} words)...")
                             
-                            # SMART AI PROMPT - Like GPT/Gemini
+                            # GENERAL-PURPOSE AI PROMPT - Works for ANY query
                             full_query = f"""USER REQUEST: "{query}"
 
-Here is the EXACT text visible on their screen:
-
+SCREEN CONTENT:
 {extracted_text[:6000]}
 
-Based on the screen content and user's request, respond appropriately:
+Instructions:
+1. Read the screen content carefully
+2. Understand what the user wants to do based on their request
+3. If drafting email/reply: Use EXACT names from screen, write from user's perspective
+4. If asking questions: Answer based on BOTH screen content AND your knowledge
+5. If analyzing: Provide specific insights from what you see
+6. For current/recent events: Use your knowledge up to 2024
+7. Be natural, helpful, and context-aware
 
-**If drafting an email/reply:**
-1. Look for the sender's name in the email (e.g., "Ragini Rajeev", "Hi Sushant", etc.)
-2. Use that EXACT name in your response (e.g., "Hi Ragini," not "Hi [Her Name]")
-3. Write FROM Sushant's perspective (use "I", "I'm")
-4. Address the specific points in the email
-5. Be professional but concise (3-5 short paragraphs)
-6. Don't add subject lines or formal headers - just the email body
-
-**If analyzing/summarizing:**
-- Provide clear, specific insights based on what you see
-
-Just respond naturally and helpfully with the actual content, not templates or placeholders!"""
+Respond directly to their request. No templates or placeholders!"""
 
                             # Use BALANCED model for better understanding
                             result = self.brain.ask(full_query, mode="balanced")
