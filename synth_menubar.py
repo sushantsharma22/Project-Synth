@@ -61,8 +61,9 @@ class FloatingPanel(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Larger size for Siri-like interface
+        # Larger size for Siri-like interface (starts compact)
         self.setGeometry(100, 100, 700, 450)
+        self.hide()  # Start hidden, only show when user clicks menu
         
         # Main widget
         main_widget = QWidget()
@@ -307,48 +308,79 @@ class FloatingPanel(QMainWindow):
         return btn
     
     def auto_detect_context(self):
-        """Auto-detect context from clipboard and screen"""
+        """Auto-detect context from clipboard (optional, not forced)"""
         try:
-            # Get clipboard
+            # Get clipboard but don't force it into queries
             clipboard_text = pyperclip.paste()
             
             if clipboard_text and len(clipboard_text.strip()) > 3:
-                preview = clipboard_text[:100].replace('\n', ' ')
+                preview = clipboard_text[:80].replace('\n', ' ')
                 self.detected_context = clipboard_text
-                self.context_label.setText(f"📋 Clipboard: {preview}...")
+                self.context_label.setText(f"📋 Context available: {preview}...")
             else:
-                self.context_label.setText("👀 Ready to analyze screen or clipboard...")
+                self.context_label.setText("� Ask me anything or describe what you need...")
                 self.detected_context = ""
             
         except Exception as e:
-            self.context_label.setText(f"⚠️ Context detection paused")
+            self.context_label.setText(f"💬 Ready for your request...")
     
     def process_query(self):
         """Process user query with Brain AI"""
         query = self.query_input.toPlainText().strip()
         
-        # Build full context
-        full_context = ""
-        if self.detected_context:
-            full_context = f"Context from clipboard:\n{self.detected_context}\n\n"
-        
         if not query:
             self.result_display.setText("💬 Please type what you'd like me to do...")
             return
         
-        # Combine query with context
-        final_query = full_context + "User request: " + query
+        # Check if user wants screen analysis
+        if any(word in query.lower() for word in ['screen', 'on my screen', 'what do you see', 'analyze screen']):
+            # User wants actual screen analysis, not clipboard
+            self.result_display.setText("� Capturing screen for analysis...")
+            QApplication.processEvents()
+            self.analyze_screen()
+            return
+        
+        # Build context only if clipboard seems relevant
+        full_context = ""
+        if self.detected_context and not query.lower().startswith(('what', 'draft', 'create', 'give me')):
+            # Only include clipboard for summarize/explain type queries
+            full_context = f"Context from clipboard:\n{self.detected_context[:500]}\n\n"
+        
+        final_query = full_context + query
         
         self.result_display.setText("🧠 Thinking...")
         QApplication.processEvents()
+        
+        # Resize window based on expected response
+        self.adjust_window_size(len(query))
         
         try:
             # Ask Brain AI
             response = self.brain.ask(final_query, mode="balanced")
             self.result_display.setText(response)
             
+            # Expand window to fit response
+            self.adjust_window_size(len(response))
+            
         except Exception as e:
             self.result_display.setText(f"❌ Error: {str(e)}")
+    
+    def adjust_window_size(self, content_length):
+        """Dynamically adjust window height based on content"""
+        base_height = 450
+        
+        if content_length > 1000:
+            new_height = 700
+        elif content_length > 500:
+            new_height = 600
+        elif content_length > 200:
+            new_height = 500
+        else:
+            new_height = base_height
+        
+        # Smooth resize
+        current_geom = self.geometry()
+        self.setGeometry(current_geom.x(), current_geom.y(), 700, new_height)
     
     def clear_all(self):
         """Clear all inputs and outputs"""
@@ -407,22 +439,63 @@ class FloatingPanel(QMainWindow):
             self.result_display.setText("🔐 Please copy text/code to analyze for security")
     
     def analyze_screen(self):
-        """Capture and analyze current screen"""
-        self.result_display.setText("📸 Capturing screen...")
+        """Capture and analyze current screen with OCR"""
+        self.result_display.setText("📸 Taking screenshot in 2 seconds...\n\nGet ready to show what you want analyzed!")
         QApplication.processEvents()
         
+        # Give user time to prepare
+        import time
+        time.sleep(2)
+        
         try:
+            # Hide this window temporarily so it doesn't appear in screenshot
+            self.hide()
+            time.sleep(0.5)
+            
             # Take screenshot
             screenshot_path = self.screen_capture.capture_region()
             
+            # Show window again
+            self.show()
+            
             if screenshot_path:
-                self.result_display.setText(f"� Screenshot saved! Analyzing...\n\nPath: {screenshot_path}")
-                # TODO: Add OCR and analysis
+                # Perform OCR on the screenshot
+                try:
+                    import pytesseract
+                    from PIL import Image
+                    
+                    self.result_display.setText("🔍 Analyzing screenshot with OCR...")
+                    QApplication.processEvents()
+                    
+                    # Extract text from image
+                    image = Image.open(screenshot_path)
+                    extracted_text = pytesseract.image_to_string(image)
+                    
+                    if extracted_text and len(extracted_text.strip()) > 10:
+                        # Ask Brain to analyze what's on screen
+                        analysis_query = f"I took a screenshot and extracted this text from it. Please analyze what's on the screen and provide helpful insights:\n\n{extracted_text}"
+                        
+                        self.result_display.setText("🧠 Brain analyzing screenshot content...")
+                        QApplication.processEvents()
+                        
+                        response = self.brain.ask(analysis_query, mode="balanced")
+                        
+                        final_result = f"📊 SCREEN ANALYSIS:\n\n{response}\n\n---\n📝 Extracted text preview:\n{extracted_text[:300]}..."
+                        self.result_display.setText(final_result)
+                        
+                        # Expand window for full analysis
+                        self.adjust_window_size(len(final_result))
+                    else:
+                        self.result_display.setText(f"📸 Screenshot saved: {screenshot_path}\n\n⚠️ No text detected. The screen might be mostly graphical or the image quality is low.")
+                        
+                except ImportError:
+                    self.result_display.setText(f"📸 Screenshot saved: {screenshot_path}\n\n⚠️ OCR not available. Install pytesseract to analyze text from screenshots.")
             else:
                 self.result_display.setText("❌ Screenshot cancelled")
                 
         except Exception as e:
-            self.result_display.setText(f"❌ Error capturing screen: {str(e)}")
+            self.show()  # Make sure window is visible again
+            self.result_display.setText(f"❌ Error analyzing screen: {str(e)}")
     
     def creative_mode(self):
         """Creative/brainstorming mode"""
@@ -443,14 +516,20 @@ class FloatingPanel(QMainWindow):
     
     def show_panel(self):
         """Show panel at cursor position with animation"""
-        # Position near top-right (like Siri/Spotlight)
+        # Position near top center (like Siri/Spotlight)
         screen = QApplication.primaryScreen().geometry()
         x = (screen.width() - self.width()) // 2  # Center horizontally
         y = 80  # Near top
+        
+        # Reset to compact size when opening
+        self.setGeometry(x, y, 700, 450)
+        
         self.move(x, y)
         self.show()
+        self.raise_()  # Bring to front
+        self.activateWindow()  # Make active
         self.query_input.setFocus()
-        self.auto_detect_context()  # Immediate detection
+        self.auto_detect_context()  # Check for clipboard context
 
 
 class SynthMenuBar(rumps.App):
