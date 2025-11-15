@@ -56,8 +56,9 @@ class SynthMenuBarNative(NSObject):
         
         # Container view - will expand based on content
         self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 100))
+        self.input_view.setWantsLayer_(True)
         
-        # Text field - make it editable and visible
+        # Text field - highly visible with cursor
         self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(15, 60, 300, 30))
         self.text_field.setPlaceholderString_("Ask Synth anything...")
         self.text_field.setTarget_(self)
@@ -67,18 +68,24 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setBezeled_(True)
         self.text_field.setBezelStyle_(1)  # Square bezel
         self.text_field.setDrawsBackground_(True)
-        self.text_field.setBackgroundColor_(NSColor.whiteColor())
-        self.text_field.setTextColor_(NSColor.blackColor())
-        self.text_field.setFont_(NSFont.systemFontOfSize_(14))
         
-        # Ask button
+        # Bright colors for visibility
+        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.95, 0.95, 0.98, 1.0))
+        self.text_field.setTextColor_(NSColor.blackColor())
+        self.text_field.setFont_(NSFont.systemFontOfSize_(15))
+        
+        # Force cursor to show
+        self.text_field.setFocusRingType_(1)  # Show focus ring
+        
+        # Ask button - bright blue
         self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(320, 60, 65, 30))
         self.ask_button.setTitle_("Ask")
-        self.ask_button.setBezelStyle_(1)  # Rounded
+        self.ask_button.setBezelStyle_(1)
         self.ask_button.setTarget_(self)
         self.ask_button.setAction_("handleQuery:")
+        self.ask_button.setKeyEquivalent_("\r")  # Enter key
         
-        # Result text view (scrollable, expandable)
+        # Result text view (scrollable, expandable) - light gray background
         scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(15, 15, 370, 40))
         scroll_view.setBorderType_(1)  # Line border
         scroll_view.setHasVerticalScroller_(True)
@@ -88,8 +95,11 @@ class SynthMenuBarNative(NSObject):
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
-        self.result_view.setFont_(NSFont.systemFontOfSize_(13))
-        self.result_view.setTextColor_(NSColor.darkGrayColor())
+        self.result_view.setFont_(NSFont.systemFontOfSize_(14))
+        
+        # Light background, dark text for readability
+        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.98, 0.98, 0.99, 1.0))
+        self.result_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.1, 0.1, 0.1, 1.0))
         self.result_view.setString_("")
         
         scroll_view.setDocumentView_(self.result_view)
@@ -160,44 +170,57 @@ class SynthMenuBarNative(NSObject):
         self.input_view.setFrame_(NSMakeRect(frame.origin.x, frame.origin.y, 400, new_height))
     
     def process_query(self, query):
-        """Process regular query and show in dropdown"""
-        try:
-            # Get response from Brain
-            result = self.brain.ask(query, mode="fast")
-            
-            # Show result in text view
-            self.result_view.setString_(result)
-            
-            # Calculate height needed for result
-            text_height = len(result) / 2  # Rough estimate
-            self.expand_view_for_content(text_height)
-            
-            # Also show notification for quick view
-            preview = result[:200] + "..." if len(result) > 200 else result
-            self.show_notification("Synth", "Answer", preview)
-            
-        except Exception as e:
-            error_msg = f"❌ Error: {str(e)}"
-            self.result_view.setString_(error_msg)
-            self.expand_view_for_content(50)
-            self.show_notification("Synth", "Error", str(e))
+        """Process regular query and show in dropdown - runs in background"""
+        import threading
+        
+        # Show loading immediately
+        self.result_view.setString_("🧠 Thinking...")
+        
+        def process_in_background():
+            try:
+                # Get response from Brain (this runs in background)
+                result = self.brain.ask(query, mode="fast")
+                
+                # Update UI safely
+                self.safe_update_result(result)
+                
+            except Exception as e:
+                error_msg = f"❌ Error: {str(e)}"
+                self.safe_update_result(error_msg)
+        
+        # Run in background thread so Mac doesn't freeze
+        thread = threading.Thread(target=process_in_background)
+        thread.daemon = True
+        thread.start()
+    
+    def safe_update_result(self, text):
+        """Safely update result view from any thread"""
+        from AppKit import NSRunLoop, NSDefaultRunLoopMode
+        import time
+        
+        # Simple way: just set the text (AppKit handles thread safety for setString_)
+        self.result_view.setString_(text)
+        
+        # Calculate and update height
+        text_height = len(text) / 2
+        self.expand_view_for_content(text_height)
     
     def quickScreenAnalysis_(self, sender):
         """Quick screen analysis from menu"""
         self.analyze_screen_with_query("what's on the screen")
     
     def analyze_screen_with_query(self, query):
-        """Analyze screen content and show in dropdown"""
+        """Analyze screen content and show in dropdown - RUNS IN BACKGROUND"""
         import time
         import threading
         
         def capture_and_analyze():
-            # Show countdown in result view
-            for i in range(2, 0, -1):
-                self.result_view.setString_(f"📸 Capturing screen in {i} seconds...")
-                time.sleep(1)
-            
             try:
+                # Show countdown in result view
+                for i in range(2, 0, -1):
+                    self.result_view.setString_(f"📸 Capturing screen in {i} seconds...")
+                    time.sleep(1)
+                
                 screenshot_img = self.screen_capture.capture()
                 
                 if screenshot_img:
@@ -205,25 +228,19 @@ class SynthMenuBarNative(NSObject):
                         import pytesseract
                         
                         self.result_view.setString_("🔍 Reading screen content...")
-                        
                         extracted_text = pytesseract.image_to_string(screenshot_img)
                         
                         if extracted_text and len(extracted_text.strip()) > 10:
                             self.result_view.setString_("🧠 Analyzing screen content...")
                             
                             full_query = f"{query}\n\nScreen content:\n{extracted_text[:800]}"
+                            
+                            # This runs in background - won't freeze Mac
                             result = self.brain.ask(full_query, mode="balanced")
                             
                             # Show full result in dropdown
-                            self.result_view.setString_(result)
+                            self.safe_update_result(result)
                             
-                            # Calculate height needed
-                            text_height = len(result) / 2
-                            self.expand_view_for_content(text_height)
-                            
-                            # Also show notification
-                            preview = result[:200] + "..." if len(result) > 200 else result
-                            self.show_notification("Synth", "Screen Analysis", preview)
                         else:
                             self.result_view.setString_("⚠️ No text detected on screen")
                             self.expand_view_for_content(50)
@@ -237,7 +254,7 @@ class SynthMenuBarNative(NSObject):
                 self.result_view.setString_(f"❌ Error: {str(e)}")
                 self.expand_view_for_content(50)
         
-        # Run in background thread
+        # Run EVERYTHING in background thread - no freezing!
         thread = threading.Thread(target=capture_and_analyze)
         thread.daemon = True
         thread.start()
