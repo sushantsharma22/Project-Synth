@@ -71,18 +71,18 @@ class SynthMenuBarNative(NSObject):
         self.text_delegate = TextFieldDelegate.alloc().init()
         self.text_delegate.parent = self
         
-        # Container view - compact and professional
-        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 300))
+        # Container view - MORE COMPACT!
+        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 270))
         self.input_view.setWantsLayer_(True)
         
-        # Result text view FIRST (at top) - GLASSMORPHISM with MORE space
-        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 60, 430, 230))
-        scroll_view.setBorderType_(0)  # No border for clean look
-        scroll_view.setDrawsBackground_(False)  # Transparent scroll view
+        # Result text view at TOP
+        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 65, 480, 195))
+        scroll_view.setBorderType_(0)
+        scroll_view.setDrawsBackground_(False)
         scroll_view.setHasVerticalScroller_(True)
-        scroll_view.setAutoresizingMask_(2)  # Width sizable
+        scroll_view.setAutoresizingMask_(2)
         
-        self.result_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 415, 230))
+        self.result_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 465, 195))
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
@@ -90,9 +90,9 @@ class SynthMenuBarNative(NSObject):
         
         # GLASSMORPHISM - Apple-style semi-transparent with better visibility
         self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.70))
-        self.result_view.setTextColor_(NSColor.whiteColor())  # Pure white text
+        self.result_view.setTextColor_(NSColor.whiteColor())
         
-        # Rounded corners for macOS look!
+        # Rounded corners
         try:
             self.result_view.setWantsLayer_(True)
             self.result_view.layer().setCornerRadius_(12.0)
@@ -100,41 +100,42 @@ class SynthMenuBarNative(NSObject):
         except:
             pass
         
-        # Enable text selection and copying with CMD+C
+        # Enable CMD+C copying!
         self.result_view.setAllowsUndo_(False)
+        self.result_view.setEditable_(False)
+        self.result_view.setSelectable_(True)
         self.result_view.setUsesFindBar_(True)
+        self.result_view.setImportsGraphics_(False)
         try:
             self.result_view.setUsesFontPanel_(False)
             self.result_view.setUsesRuler_(False)
             # Word wrap and padding
             self.result_view.textContainer().setWidthTracksTextView_(True)
-            self.result_view.textContainer().setContainerSize_(NSMakeSize(415, 10000))
+            self.result_view.textContainer().setContainerSize_(NSMakeSize(465, 10000))
             self.result_view.textContainer().setLineFragmentPadding_(10.0)
         except:
             pass
         
-        self.result_view.setString_("Ready... Ask me anything!")
-        
         scroll_view.setDocumentView_(self.result_view)
         self.scroll_view = scroll_view
         
-        # Text input - NSTextView with VISIBLE CURSOR and better styling
-        text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 15, 260, 35))
-        text_scroll.setBorderType_(0)  # No border for clean look
-        text_scroll.setDrawsBackground_(False)  # Transparent scroll view
+        # Text input ABOVE buttons now!
+        text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 30, 480, 30))
+        text_scroll.setBorderType_(0)
+        text_scroll.setDrawsBackground_(False)
         text_scroll.setHasVerticalScroller_(False)
         text_scroll.setHasHorizontalScroller_(False)
         
-        self.text_field = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 260, 35))
+        self.text_field = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 480, 30))
         self.text_field.setEditable_(True)
         self.text_field.setSelectable_(True)
         self.text_field.setRichText_(False)
         self.text_field.setFont_(NSFont.systemFontOfSize_(14))
         
-        # GLASSMORPHISM - Apple style, lighter for better cursor visibility
-        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.18, 0.18, 0.20, 0.70))
-        self.text_field.setTextColor_(NSColor.whiteColor())  # Pure white text
-        self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 1.0))  # BRIGHT WHITE cursor!
+        # BETTER GLASSMORPHISM - lighter, more transparent
+        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.20, 0.20, 0.22, 0.65))
+        self.text_field.setTextColor_(NSColor.whiteColor())
+        self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 1.0))
         
         # Rounded corners!
         try:
@@ -144,13 +145,13 @@ class SynthMenuBarNative(NSObject):
         except:
             pass
         
-        # Enable word wrap and proper sizing
+        # Better text handling
         self.text_field.setHorizontallyResizable_(False)
         self.text_field.setVerticallyResizable_(True)
         try:
             self.text_field.textContainer().setWidthTracksTextView_(True)
-            self.text_field.textContainer().setContainerSize_(NSMakeSize(260, 1000))
-            self.text_field.textContainer().setLineFragmentPadding_(8.0)  # Better padding
+            self.text_field.textContainer().setContainerSize_(NSMakeSize(480, 1000))
+            self.text_field.textContainer().setLineFragmentPadding_(10.0)
         except:
             pass
         
@@ -160,35 +161,50 @@ class SynthMenuBarNative(NSObject):
         # Set delegate to handle Enter key
         self.text_field.setDelegate_(self.text_delegate)
 
-        # Buttons - FULL WIDTH so text shows completely!
-        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(275, 15, 55, 35))
+        # 4 BUTTONS BELOW TEXT INPUT - proper spacing and colors!
+        # Ask button - BLUE/GREEN accent color to stand out!
+        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(10, 5, 110, 20))
         self.ask_button.setTitle_("Ask")
         self.ask_button.setBezelStyle_(1)
         self.ask_button.setTarget_(self)
         self.ask_button.setAction_("handleQuery:")
-        self.ask_button.setKeyEquivalent_("\r")  # Enter key
-        self.ask_button.setFont_(NSFont.systemFontOfSize_(13))
+        self.ask_button.setKeyEquivalent_("\r")
+        self.ask_button.setFont_(NSFont.systemFontOfSize_(11))
+        # Blue accent color
+        try:
+            self.ask_button.setBezelColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.5, 1.0, 0.8))
+        except:
+            pass
         
-        # Copy button - Full text visible
-        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(335, 15, 55, 35))
+        # Screen button - captures ONLY when checkbox is ON
+        self.screen_button = NSButton.alloc().initWithFrame_(NSMakeRect(125, 5, 110, 20))
+        self.screen_button.setTitle_("📸 Screen")
+        self.screen_button.setButtonType_(3)  # Switch/checkbox button
+        self.screen_button.setBezelStyle_(1)
+        self.screen_button.setState_(0)  # Off by default
+        self.screen_button.setFont_(NSFont.systemFontOfSize_(11))
+        
+        # Copy button - same style as Clear
+        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(240, 5, 110, 20))
         self.copy_button.setTitle_("Copy")
         self.copy_button.setBezelStyle_(1)
         self.copy_button.setTarget_(self)
         self.copy_button.setAction_("copyResults:")
-        self.copy_button.setFont_(NSFont.systemFontOfSize_(13))
+        self.copy_button.setFont_(NSFont.systemFontOfSize_(11))
         
-        # Clear button - Full text visible
-        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(395, 15, 55, 35))
+        # Clear button
+        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(355, 5, 110, 20))
         self.clear_button.setTitle_("Clear")
         self.clear_button.setBezelStyle_(1)
-        self.clear_button.setFont_(NSFont.systemFontOfSize_(13))
+        self.clear_button.setFont_(NSFont.systemFontOfSize_(11))
         self.clear_button.setTarget_(self)
         self.clear_button.setAction_("clearResults:")
         
-        # Add to view - result area on top, controls at bottom
+        # Add to view
         self.input_view.addSubview_(scroll_view)
         self.input_view.addSubview_(text_scroll)
         self.input_view.addSubview_(self.ask_button)
+        self.input_view.addSubview_(self.screen_button)
         self.input_view.addSubview_(self.copy_button)
         self.input_view.addSubview_(self.clear_button)
         
@@ -196,7 +212,7 @@ class SynthMenuBarNative(NSObject):
         self.scroll_view.setHidden_(True)
     
     def build_menu(self):
-        """Build menu with embedded input view"""
+        """Build menu with embedded input view and settings"""
         # Add custom view as menu item
         view_item = NSMenuItem.alloc().init()
         view_item.setView_(self.input_view)
@@ -205,12 +221,65 @@ class SynthMenuBarNative(NSObject):
         # Separator
         self.menu.addItem_(NSMenuItem.separatorItem())
         
+        # Settings submenu (3 dots equivalent) - WITH ACTIONS
+        settings_menu = NSMenu.alloc().init()
+        settings_menu.setTitle_("Settings")
+        
+        # Plugin features with actions
+        email_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📧 Email Plugin", "showPluginInfo:", "")
+        email_item.setTarget_(self)
+        email_item.setRepresentedObject_("Email")
+        
+        file_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📁 File Manager", "showPluginInfo:", "")
+        file_item.setTarget_(self)
+        file_item.setRepresentedObject_("FileManager")
+        
+        web_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🔍 Web Search", "showPluginInfo:", "")
+        web_item.setTarget_(self)
+        web_item.setRepresentedObject_("WebSearch")
+        
+        code_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📊 Code Analyzer", "showPluginInfo:", "")
+        code_item.setTarget_(self)
+        code_item.setRepresentedObject_("CodeAnalyzer")
+        
+        security_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🔐 Security Tools", "showPluginInfo:", "")
+        security_item.setTarget_(self)
+        security_item.setRepresentedObject_("Security")
+        
+        calc_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🧮 Calculator", "showPluginInfo:", "")
+        calc_item.setTarget_(self)
+        calc_item.setRepresentedObject_("Calculator")
+        
+        cal_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📅 Calendar", "showPluginInfo:", "")
+        cal_item.setTarget_(self)
+        cal_item.setRepresentedObject_("Calendar")
+        
+        git_item = settings_menu.addItemWithTitle_action_keyEquivalent_("💻 Git Helper", "showPluginInfo:", "")
+        git_item.setTarget_(self)
+        git_item.setRepresentedObject_("Git")
+        
+        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "⚙️ Plugins & Settings", None, ""
+        )
+        settings_item.setSubmenu_(settings_menu)
+        self.menu.addItem_(settings_item)
+        
+        # Separator
+        self.menu.addItem_(NSMenuItem.separatorItem())
+        
         # Quick screen analysis
         screen_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "📸 Analyze Screen", "quickScreenAnalysis:", ""
+            "📸 Quick Screen Analysis", "quickScreenAnalysis:", ""
         )
         screen_item.setTarget_(self)
         self.menu.addItem_(screen_item)
+    
+    def showPluginInfo_(self, sender):
+        """Show plugin information when clicked"""
+        plugin_name = sender.representedObject()
+        message = f"{plugin_name} plugin selected! Feature coming soon."
+        self.safe_update_result(message)
+        self.scroll_view.setHidden_(False)
     
     def clearResults_(self, sender):
         """Clear the result area and reset view - also clear the text field!"""
@@ -222,8 +291,8 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setString_("")
         self.text_field.setEditable_(True)
         
-        # Reset to compact height (just controls visible)
-        self.input_view.setFrame_(NSMakeRect(0, 0, 400, 60))
+        # Reset to compact height
+        self.input_view.setFrame_(NSMakeRect(0, 0, 500, 60))
         
         # Focus back on text field so user can type immediately
         try:
@@ -245,8 +314,19 @@ class SynthMenuBarNative(NSObject):
             # Show brief notification
             self.show_notification("Copied!", "", "Result copied to clipboard")
     
+    def screenWithQuery_(self, sender):
+        """Auto-capture screen + use query - ONE CLICK!"""
+        query = str(self.text_field.string()).strip()
+        
+        if not query:
+            # If no query, just do screen analysis
+            self.analyze_screen_with_query("What's on the screen?")
+        else:
+            # Use the query WITH screen capture automatically
+            self.analyze_screen_with_query(query)
+    
     def handleQuery_(self, sender):
-        """Handle query from text field"""
+        """Handle query from text field - CHECK SCREEN CHECKBOX!"""
         query = str(self.text_field.string()).strip()
         
         if not query:
@@ -257,31 +337,30 @@ class SynthMenuBarNative(NSObject):
         self.safe_update_result("🧠 Thinking...")
         self.expand_view_for_content(100)
         
-        # Check for screen analysis - KEEP TEXT VISIBLE during analysis
-        ql = query.lower()
-        screen_triggers = ['on screen', 'analyze screen', 'on my screen', 'from screen', 'email on screen', 'mail on screen']
-        if any(trigger in ql for trigger in screen_triggers):
-            # Run screen analysis (non-blocking)
-            # KEEP text field so user can see their query - DON'T CLEAR!
+        # Check if Screen checkbox is ON
+        screen_enabled = self.screen_button.state() == 1
+        
+        if screen_enabled:
+            # User wants screen capture WITH this query
             self.analyze_screen_with_query(query)
         else:
-            # For regular queries ONLY, clear text field after reading
+            # Regular query without screen
             self.text_field.setString_("")
             self.process_query(query)
     
     def expand_view_for_content(self, content_height):
-        """Expand the view to fit content - KEEPS CONTROLS AT BOTTOM"""
+        """Expand the view to fit content"""
         from AppKit import NSMakeRect
         
-        # Calculate new total height (controls=60, result area grows)
-        result_height = min(300, max(80, content_height))
-        new_total_height = result_height + 70  # 60 for controls + 10 padding
+        # Calculate new total height
+        result_height = min(240, max(80, content_height))
+        new_total_height = result_height + 70
         
         # Resize scroll view (result area)
-        self.scroll_view.setFrame_(NSMakeRect(10, 60, 430, result_height))
+        self.scroll_view.setFrame_(NSMakeRect(10, 65, 480, result_height))
         
         # Resize container
-        self.input_view.setFrame_(NSMakeRect(0, 0, 450, new_total_height))
+        self.input_view.setFrame_(NSMakeRect(0, 0, 500, new_total_height))
     
     def process_query(self, query):
         """Process regular query and show in dropdown - runs in background"""
