@@ -17,6 +17,8 @@ sys.path.insert(0, str(project_root))
 
 from brain_client import DeltaBrain
 from src.senses.screen_capture import ScreenCapture
+from src.plugins.plugin_manager import PluginManager
+from src.plugins.base_plugin import PluginContext
 
 
 class TextFieldDelegate(NSObject):
@@ -43,6 +45,12 @@ class SynthMenuBarNative(NSObject):
         # Initialize AI components
         self.brain = DeltaBrain()
         self.screen_capture = ScreenCapture()
+        
+        # Initialize Plugin Manager
+        print("🔌 Loading plugins...")
+        self.plugin_manager = PluginManager()
+        self.plugin_manager.load_all_plugins()
+        print(f"✅ Loaded {len(self.plugin_manager.plugins)} plugins")
         
         # Create status bar item
         self.statusbar = NSStatusBar.systemStatusBar()
@@ -100,15 +108,28 @@ class SynthMenuBarNative(NSObject):
         except:
             pass
         
-        # Enable CMD+C copying!
+        # Enable CMD+C copying - FIXED!
         self.result_view.setAllowsUndo_(False)
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
-        self.result_view.setUsesFindBar_(True)
-        self.result_view.setImportsGraphics_(False)
+        
+        # Enable copy/paste operations
         try:
+            self.result_view.setAutomaticTextReplacementEnabled_(False)
+            self.result_view.setAutomaticQuoteSubstitutionEnabled_(False)
+            self.result_view.setAutomaticDashSubstitutionEnabled_(False)
+        except:
+            pass
+        
+        try:
+            self.result_view.setUsesFindBar_(True)
+            self.result_view.setImportsGraphics_(False)
             self.result_view.setUsesFontPanel_(False)
             self.result_view.setUsesRuler_(False)
+            
+            # CRITICAL: Allow text to be responder for CMD+C
+            self.result_view.setAcceptsFirstResponder_(True)
+            
             # Word wrap and padding
             self.result_view.textContainer().setWidthTracksTextView_(True)
             self.result_view.textContainer().setContainerSize_(NSMakeSize(465, 10000))
@@ -275,11 +296,29 @@ class SynthMenuBarNative(NSObject):
         self.menu.addItem_(screen_item)
     
     def showPluginInfo_(self, sender):
-        """Show plugin information when clicked"""
+        """Execute plugin action when clicked"""
         plugin_name = sender.representedObject()
-        message = f"{plugin_name} plugin selected! Feature coming soon."
-        self.safe_update_result(message)
-        self.scroll_view.setHidden_(False)
+        
+        # Get plugin from manager
+        plugin = self.plugin_manager.plugins.get(plugin_name)
+        
+        if plugin:
+            # Show plugin info
+            info = f"""🔌 {plugin.metadata.name} v{plugin.metadata.version}
+
+{plugin.metadata.description}
+
+Author: {plugin.metadata.author}
+Status: {"✅ Enabled" if plugin.enabled else "❌ Disabled"}
+
+Type your request in the text field above and click Ask to use this plugin!
+The plugin will automatically activate when relevant to your query."""
+            
+            self.safe_update_result(info)
+            self.scroll_view.setHidden_(False)
+            self.expand_view_for_content(200)
+        else:
+            self.safe_update_result(f"❌ Plugin '{plugin_name}' not found")
     
     def clearResults_(self, sender):
         """Clear the result area and reset view - also clear the text field!"""
@@ -443,18 +482,30 @@ class SynthMenuBarNative(NSObject):
                         if extracted_text and len(extracted_text.strip()) > 10:
                             self.safe_update_result(f"🧠 Analyzing ({len(extracted_text.split())} words)...")
                             
-                            # SMART CONTEXT-AWARE PROMPT - Like GPT/Gemini, no hardcoding!
-                            # Just give the AI the user's request and screen content - let it figure out what to do
-                            full_query = f"""The user is looking at their screen and said: "{query}"
+                            # BETTER AI PROMPT - Extract ALL details including names, emails, context
+                            full_query = f"""You are an intelligent assistant analyzing what the user sees on their screen.
 
-Here's what's on their screen:
+USER REQUEST: "{query}"
 
-{extracted_text[:4000]}
+SCREEN CONTENT:
+{extracted_text[:5000]}
 
-Understand the user's intent from their request and the screen content, then provide a helpful response. Be natural, concise, and context-aware."""
+INSTRUCTIONS:
+1. Carefully read ALL text from the screen
+2. Extract key information: names, emails, dates, companies, context
+3. Understand what the user wants to do
+4. If drafting emails/replies:
+   - Use the EXACT name/email you see on screen
+   - Write FROM the user's perspective (use "I", "my")
+   - Match the tone and context
+   - Be professional but concise
+5. If analyzing content: provide clear, specific insights
+6. Be context-aware and helpful
 
-                            # Use FAST model for quick response
-                            result = self.brain.ask(full_query, mode="fast")
+Respond directly to the user's request using the screen information."""
+
+                            # Use BALANCED model for better understanding
+                            result = self.brain.ask(full_query, mode="balanced")
                             
                             # Show result
                             self.safe_update_result(result)
