@@ -230,16 +230,6 @@ This is a personal project for University of Windsor students with access to the
 
 MIT License - See LICENSE file for details
 
-## Acknowledgments
-
-- University of Windsor School of Computer Science
-- Delta HPC System
-- Ollama project
-
-## Support
-
-For Delta HPC access issues: http://help.cs.uwindsor.ca
-
 ---
 
 **Status:** Production Ready ✅  
