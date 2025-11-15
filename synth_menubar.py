@@ -437,7 +437,7 @@ class FloatingPanel(QMainWindow):
     
     def analyze_screen(self):
         """Capture and analyze current screen with OCR"""
-        self.result_display.setText("📸 Taking screenshot in 2 seconds...\n\nGet ready to show what you want analyzed!")
+        self.result_display.setText("📸 Taking screenshot in 2 seconds...\n\nGet ready!")
         QApplication.processEvents()
         
         # Give user time to prepare
@@ -445,28 +445,26 @@ class FloatingPanel(QMainWindow):
         time.sleep(2)
         
         try:
-            # Hide this window temporarily so it doesn't appear in screenshot
+            # Hide this window temporarily
             self.hide()
             time.sleep(0.5)
             
-            # Take screenshot
-            screenshot_path = self.screen_capture.capture_region()
+            # Take screenshot - capture() returns PIL Image
+            screenshot_img = self.screen_capture.capture()
             
             # Show window again
             self.show()
             
-            if screenshot_path:
+            if screenshot_img:
                 # Perform OCR on the screenshot
                 try:
                     import pytesseract
-                    from PIL import Image
                     
                     self.result_display.setText("🔍 Analyzing screenshot with OCR...")
                     QApplication.processEvents()
                     
-                    # Extract text from image
-                    image = Image.open(screenshot_path)
-                    extracted_text = pytesseract.image_to_string(image)
+                    # Extract text from PIL Image directly
+                    extracted_text = pytesseract.image_to_string(screenshot_img)
                     
                     if extracted_text and len(extracted_text.strip()) > 10:
                         # Ask Brain to analyze what's on screen
@@ -483,12 +481,12 @@ class FloatingPanel(QMainWindow):
                         # Expand window for full analysis
                         self.adjust_window_size(len(final_result))
                     else:
-                        self.result_display.setText(f"📸 Screenshot saved: {screenshot_path}\n\n⚠️ No text detected. The screen might be mostly graphical or the image quality is low.")
+                        self.result_display.setText(f"📸 Screenshot captured!\n\n⚠️ No text detected. The screen might be mostly graphical or the image quality is low.")
                         
                 except ImportError:
-                    self.result_display.setText(f"📸 Screenshot saved: {screenshot_path}\n\n⚠️ OCR not available. Install pytesseract to analyze text from screenshots.")
+                    self.result_display.setText(f"📸 Screenshot captured!\n\n⚠️ OCR not available. Install pytesseract to analyze text from screenshots.")
             else:
-                self.result_display.setText("❌ Screenshot cancelled")
+                self.result_display.setText("❌ Screenshot failed")
                 
         except Exception as e:
             self.show()  # Make sure window is visible again
@@ -540,10 +538,8 @@ class SynthMenuBar(rumps.App):
             quit_button=None
         )
         
-        # Menu items
+        # Menu items (keeping for right-click or additional options)
         self.menu = [
-            rumps.MenuItem("Open Synth", callback=self.open_panel),
-            rumps.separator,
             rumps.MenuItem("Quick Analyze", callback=self.quick_analyze),
             rumps.MenuItem("Screenshot + Analyze", callback=self.screenshot_analyze),
             rumps.separator,
@@ -556,8 +552,12 @@ class SynthMenuBar(rumps.App):
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
         self.panel = FloatingPanel()
         
-    def open_panel(self, _):
-        """Open the floating panel"""
+        # Override the default click behavior to open panel directly
+        self.title = "Synth"
+    
+    @rumps.clicked("Synth")
+    def title_clicked(self, _):
+        """When clicking the title/icon, open the panel directly"""
         self.panel.show_panel()
         
     def quick_analyze(self, _):
