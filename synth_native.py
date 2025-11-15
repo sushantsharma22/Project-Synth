@@ -121,10 +121,10 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setRichText_(False)
         self.text_field.setFont_(NSFont.systemFontOfSize_(13))
         
-        # PURE WHITE background with PURE BLACK text - cursor will be visible!
-        self.text_field.setBackgroundColor_(NSColor.whiteColor())
-        self.text_field.setTextColor_(NSColor.blackColor())
-        self.text_field.setInsertionPointColor_(NSColor.blackColor())  # Set cursor color!
+        # DARK THEME - match the rest of the UI with semi-transparent dark background
+        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.2, 0.22, 0.95))
+        self.text_field.setTextColor_(NSColor.whiteColor())
+        self.text_field.setInsertionPointColor_(NSColor.whiteColor())  # WHITE cursor for dark theme!
         
         # Enable word wrap for long text
         self.text_field.setHorizontallyResizable_(False)
@@ -142,15 +142,22 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setDelegate_(self.text_delegate)
 
         # Ask button - ALWAYS VISIBLE at bottom
-        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(240, 20, 55, 30))
+        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(240, 20, 45, 30))
         self.ask_button.setTitle_("Ask")
         self.ask_button.setBezelStyle_(1)
         self.ask_button.setTarget_(self)
         self.ask_button.setAction_("handleQuery:")
         self.ask_button.setKeyEquivalent_("\r")  # Enter key
         
+        # Copy button - Copy output to clipboard
+        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(290, 20, 45, 30))
+        self.copy_button.setTitle_("Copy")
+        self.copy_button.setBezelStyle_(1)
+        self.copy_button.setTarget_(self)
+        self.copy_button.setAction_("copyResults:")
+        
         # Clear button - ALWAYS VISIBLE at bottom
-        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(300, 20, 85, 30))
+        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(340, 20, 45, 30))
         self.clear_button.setTitle_("Clear")
         self.clear_button.setBezelStyle_(1)
         self.clear_button.setTarget_(self)
@@ -160,6 +167,7 @@ class SynthMenuBarNative(NSObject):
         self.input_view.addSubview_(scroll_view)
         self.input_view.addSubview_(text_scroll)
         self.input_view.addSubview_(self.ask_button)
+        self.input_view.addSubview_(self.copy_button)
         self.input_view.addSubview_(self.clear_button)
         
         # Initially hide result view
@@ -200,6 +208,20 @@ class SynthMenuBarNative(NSObject):
             self.text_field.window().makeFirstResponder_(self.text_field)
         except:
             pass
+    
+    def copyResults_(self, sender):
+        """Copy the result text to clipboard"""
+        from AppKit import NSPasteboard
+        
+        result_text = str(self.result_view.string())
+        if result_text:
+            # Get the general pasteboard
+            pasteboard = NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            pasteboard.setString_forType_(result_text, "public.utf8-plain-text")
+            
+            # Show brief notification
+            self.show_notification("Copied!", "", "Result copied to clipboard")
     
     def handleQuery_(self, sender):
         """Handle query from text field"""
