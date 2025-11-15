@@ -1,7 +1,14 @@
-# Personal Documentation (Keep Private)
+# Personal Documentation (Keep Private - NOT for GitHub)
 SETUP_DOCUMENTATION.md
 QUICK_START.md
 AUTO_CONNECT_README.md
+PHASE1_COMPLETE.md
+PHASE1_VERIFICATION.md
+DEVELOPMENT_ROADMAP.md
+BRAIN_DOCUMENTATION.md
+demo_phase1.py
+*_VERIFICATION.md
+*_COMPLETE.md
 
 # Sensitive Configuration
 *.plist
