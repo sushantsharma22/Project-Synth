@@ -52,12 +52,13 @@ class FloatingPanel(QMainWindow):
         
     def init_ui(self):
         """Setup the Siri-like floating panel UI"""
-        # Window settings
+        # Window settings - behaves like menu dropdown
         self.setWindowTitle("Synth")
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Tool
+            Qt.WindowType.Tool |
+            Qt.WindowType.Popup  # Makes it behave like a dropdown menu
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
@@ -509,12 +510,30 @@ class FloatingPanel(QMainWindow):
             if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
                 self.process_query()
     
+    def focusOutEvent(self, event):
+        """Hide panel when clicking outside (like a menu)"""
+        # Don't hide if clicking on our own menu
+        if event.reason() != Qt.FocusReason.PopupFocusReason:
+            # Small delay to allow menu interactions
+            QTimer.singleShot(100, self.check_and_hide)
+        super().focusOutEvent(event)
+    
+    def check_and_hide(self):
+        """Check if we should hide the panel"""
+        # Only hide if not actively typing or if a menu is open
+        if not self.query_input.hasFocus() and not self.result_display.hasFocus():
+            # Don't hide immediately, give a small grace period
+            pass  # Removed auto-hide for better UX
+    
     def show_panel(self):
-        """Show panel at cursor position with animation"""
-        # Position near top center (like Siri/Spotlight)
+        """Show panel directly under menu bar icon like a dropdown"""
+        # Get menu bar position (top of screen)
         screen = QApplication.primaryScreen().geometry()
-        x = (screen.width() - 680) // 2  # Center horizontally
-        y = 80  # Near top
+        
+        # Position directly under menu bar (right side where Synth icon is)
+        # Menu bar is typically at top-right, so position accordingly
+        x = screen.width() - 700  # Right side, with some margin
+        y = 30  # Just below menu bar (menu bar is ~25px tall)
         
         # Reset to compact size when opening
         self.setGeometry(x, y, 680, 400)
@@ -522,10 +541,10 @@ class FloatingPanel(QMainWindow):
         
         self.move(x, y)
         self.show()
-        self.raise_()  # Bring to front
-        self.activateWindow()  # Make active
+        self.raise_()
+        self.activateWindow()
         self.query_input.setFocus()
-        self.auto_detect_context()  # Check for clipboard context
+        self.auto_detect_context()
 
 
 class SynthMenuBar(rumps.App):
