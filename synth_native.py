@@ -151,12 +151,14 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setEditable_(True)
         self.text_field.setSelectable_(True)
         self.text_field.setRichText_(False)
-        self.text_field.setFont_(NSFont.systemFontOfSize_(14))
+        self.text_field.setFont_(NSFont.systemFontOfSize_(15))  # Bigger font
         
-        # BETTER GLASSMORPHISM - lighter, more transparent
-        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.20, 0.20, 0.22, 0.65))
+        # LIGHTER background for BRIGHT CURSOR visibility!
+        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.25, 0.25, 0.27, 0.60))
         self.text_field.setTextColor_(NSColor.whiteColor())
-        self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 1.0))
+        
+        # BRIGHT CYAN/BLUE CURSOR - VERY VISIBLE!
+        self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(0.3, 0.8, 1.0, 1.0))
         
         # Rounded corners!
         try:
@@ -182,42 +184,43 @@ class SynthMenuBarNative(NSObject):
         # Set delegate to handle Enter key
         self.text_field.setDelegate_(self.text_delegate)
 
-        # 4 BUTTONS BELOW TEXT INPUT - proper spacing and colors!
-        # Ask button - BLUE/GREEN accent color to stand out!
-        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(10, 5, 110, 20))
+        # 4 BUTTONS BELOW TEXT INPUT - PROPERLY ALIGNED!
+        # Ask button - BLUE accent color to stand out!
+        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(10, 5, 115, 20))
         self.ask_button.setTitle_("Ask")
         self.ask_button.setBezelStyle_(1)
         self.ask_button.setTarget_(self)
         self.ask_button.setAction_("handleQuery:")
         self.ask_button.setKeyEquivalent_("\r")
-        self.ask_button.setFont_(NSFont.systemFontOfSize_(11))
-        # Blue accent color
+        self.ask_button.setFont_(NSFont.systemFontOfSize_(12))
+        # Blue accent color for Ask button
         try:
-            self.ask_button.setBezelColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.5, 1.0, 0.8))
+            from AppKit import NSBezelStyle
+            self.ask_button.setBezelStyle_(4)  # Rounded rect
         except:
             pass
         
-        # Screen button - captures ONLY when checkbox is ON
-        self.screen_button = NSButton.alloc().initWithFrame_(NSMakeRect(125, 5, 110, 20))
+        # Screen button - checkbox toggle
+        self.screen_button = NSButton.alloc().initWithFrame_(NSMakeRect(130, 5, 115, 20))
         self.screen_button.setTitle_("📸 Screen")
-        self.screen_button.setButtonType_(3)  # Switch/checkbox button
+        self.screen_button.setButtonType_(3)  # Checkbox
         self.screen_button.setBezelStyle_(1)
-        self.screen_button.setState_(0)  # Off by default
-        self.screen_button.setFont_(NSFont.systemFontOfSize_(11))
+        self.screen_button.setState_(0)
+        self.screen_button.setFont_(NSFont.systemFontOfSize_(12))
         
         # Copy button - same style as Clear
-        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(240, 5, 110, 20))
+        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(250, 5, 115, 20))
         self.copy_button.setTitle_("Copy")
         self.copy_button.setBezelStyle_(1)
         self.copy_button.setTarget_(self)
         self.copy_button.setAction_("copyResults:")
-        self.copy_button.setFont_(NSFont.systemFontOfSize_(11))
+        self.copy_button.setFont_(NSFont.systemFontOfSize_(12))
         
         # Clear button
-        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(355, 5, 110, 20))
+        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(370, 5, 115, 20))
         self.clear_button.setTitle_("Clear")
         self.clear_button.setBezelStyle_(1)
-        self.clear_button.setFont_(NSFont.systemFontOfSize_(11))
+        self.clear_button.setFont_(NSFont.systemFontOfSize_(12))
         self.clear_button.setTarget_(self)
         self.clear_button.setAction_("clearResults:")
         
@@ -246,38 +249,38 @@ class SynthMenuBarNative(NSObject):
         settings_menu = NSMenu.alloc().init()
         settings_menu.setTitle_("Settings")
         
-        # Plugin features with actions
+        # Plugin features with CORRECT names matching actual plugin metadata
         email_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📧 Email Plugin", "showPluginInfo:", "")
         email_item.setTarget_(self)
-        email_item.setRepresentedObject_("Email")
+        email_item.setRepresentedObject_("email_plugin")
         
         file_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📁 File Manager", "showPluginInfo:", "")
         file_item.setTarget_(self)
-        file_item.setRepresentedObject_("FileManager")
+        file_item.setRepresentedObject_("file_management_plugin")
         
         web_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🔍 Web Search", "showPluginInfo:", "")
         web_item.setTarget_(self)
-        web_item.setRepresentedObject_("WebSearch")
+        web_item.setRepresentedObject_("web_search_plugin")
         
         code_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📊 Code Analyzer", "showPluginInfo:", "")
         code_item.setTarget_(self)
-        code_item.setRepresentedObject_("CodeAnalyzer")
+        code_item.setRepresentedObject_("code_doc_plugin")
         
         security_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🔐 Security Tools", "showPluginInfo:", "")
         security_item.setTarget_(self)
-        security_item.setRepresentedObject_("Security")
+        security_item.setRepresentedObject_("security_plugin")
         
         calc_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🧮 Calculator", "showPluginInfo:", "")
         calc_item.setTarget_(self)
-        calc_item.setRepresentedObject_("Calculator")
+        calc_item.setRepresentedObject_("math_plugin")
         
         cal_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📅 Calendar", "showPluginInfo:", "")
         cal_item.setTarget_(self)
-        cal_item.setRepresentedObject_("Calendar")
+        cal_item.setRepresentedObject_("calendar_plugin")
         
         git_item = settings_menu.addItemWithTitle_action_keyEquivalent_("💻 Git Helper", "showPluginInfo:", "")
         git_item.setTarget_(self)
-        git_item.setRepresentedObject_("Git")
+        git_item.setRepresentedObject_("git_plugin")
         
         settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "⚙️ Plugins & Settings", None, ""
@@ -482,27 +485,27 @@ The plugin will automatically activate when relevant to your query."""
                         if extracted_text and len(extracted_text.strip()) > 10:
                             self.safe_update_result(f"🧠 Analyzing ({len(extracted_text.split())} words)...")
                             
-                            # BETTER AI PROMPT - Extract ALL details including names, emails, context
-                            full_query = f"""You are an intelligent assistant analyzing what the user sees on their screen.
+                            # SMART AI PROMPT - Like GPT/Gemini
+                            full_query = f"""USER REQUEST: "{query}"
 
-USER REQUEST: "{query}"
+Here is the EXACT text visible on their screen:
 
-SCREEN CONTENT:
-{extracted_text[:5000]}
+{extracted_text[:6000]}
 
-INSTRUCTIONS:
-1. Carefully read ALL text from the screen
-2. Extract key information: names, emails, dates, companies, context
-3. Understand what the user wants to do
-4. If drafting emails/replies:
-   - Use the EXACT name/email you see on screen
-   - Write FROM the user's perspective (use "I", "my")
-   - Match the tone and context
-   - Be professional but concise
-5. If analyzing content: provide clear, specific insights
-6. Be context-aware and helpful
+Based on the screen content and user's request, respond appropriately:
 
-Respond directly to the user's request using the screen information."""
+**If drafting an email/reply:**
+1. Look for the sender's name in the email (e.g., "Ragini Rajeev", "Hi Sushant", etc.)
+2. Use that EXACT name in your response (e.g., "Hi Ragini," not "Hi [Her Name]")
+3. Write FROM Sushant's perspective (use "I", "I'm")
+4. Address the specific points in the email
+5. Be professional but concise (3-5 short paragraphs)
+6. Don't add subject lines or formal headers - just the email body
+
+**If analyzing/summarizing:**
+- Provide clear, specific insights based on what you see
+
+Just respond naturally and helpfully with the actual content, not templates or placeholders!"""
 
                             # Use BALANCED model for better understanding
                             result = self.brain.ask(full_query, mode="balanced")
