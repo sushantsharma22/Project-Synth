@@ -59,7 +59,7 @@ class SynthMenuBarNative(NSObject):
         self.input_view.setWantsLayer_(True)
         
         # Text field - highly visible with cursor
-        self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(15, 60, 300, 30))
+        self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(15, 60, 225, 30))
         self.text_field.setPlaceholderString_("Ask Synth anything...")
         self.text_field.setTarget_(self)
         self.text_field.setAction_("handleQuery:")
@@ -69,8 +69,8 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setBezelStyle_(1)  # Square bezel
         self.text_field.setDrawsBackground_(True)
 
-        # Bright colors for visibility
-        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.95, 0.95, 0.98, 1.0))
+        # Light background with DARK text for better cursor visibility
+        self.text_field.setBackgroundColor_(NSColor.whiteColor())
         self.text_field.setTextColor_(NSColor.blackColor())
         self.text_field.setFont_(NSFont.systemFontOfSize_(14))
 
@@ -102,15 +102,16 @@ class SynthMenuBarNative(NSObject):
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
-        self.result_view.setFont_(NSFont.systemFontOfSize_(13))
+        self.result_view.setFont_(NSFont.systemFontOfSize_(14))
         
-        # Dark background, white text for better contrast
-        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.12, 0.12, 0.14, 1.0))
+        # Dark background with BRIGHT white text for excellent contrast
+        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.17, 1.0))
         try:
-            self.result_view.setTextColor_(NSColor.whiteColor())
+            # Use bright white for maximum visibility
+            self.result_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.98, 0.98, 1.0, 1.0))
         except Exception:
-            # Fallback for older PyObjC bindings
-            self.result_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 1.0))
+            # Fallback
+            self.result_view.setTextColor_(NSColor.whiteColor())
         self.result_view.setString_("")
         
         scroll_view.setDocumentView_(self.result_view)
@@ -145,12 +146,23 @@ class SynthMenuBarNative(NSObject):
         self.menu.addItem_(screen_item)
     
     def clearResults_(self, sender):
-        """Clear the result area and reset view"""
+        """Clear the result area and reset view - also clear the text field!"""
+        # Clear result area
         self.result_view.setString_("")
         self.scroll_view.setHidden_(True)
+        
+        # Clear the text field AND make it editable again
         self.text_field.setStringValue_("")
+        self.text_field.setEditable_(True)
+        
         # Reset to default height
         self.input_view.setFrame_(NSMakeRect(0, 0, 400, 100))
+        
+        # Focus back on text field so user can type immediately
+        try:
+            self.text_field.window().makeFirstResponder_(self.text_field)
+        except:
+            pass
     
     def handleQuery_(self, sender):
         """Handle query from text field"""
@@ -161,16 +173,16 @@ class SynthMenuBarNative(NSObject):
         
         # Show result area and loading message
         self.scroll_view.setHidden_(False)
-        self.result_view.setString_("🧠 Thinking...")
+        self.safe_update_result("🧠 Thinking...")
         self.expand_view_for_content(50)
         
         # Check for screen analysis -- be conservative to avoid accidental triggers
         # Only trigger when user explicitly mentions "on screen" or "analyze screen"
         ql = query.lower()
-        screen_triggers = ['on screen', "analyze screen", "screen"]
+        screen_triggers = ['on screen', 'analyze screen', 'on my screen', 'from screen', 'email on screen', 'mail on screen']
         if any(trigger in ql for trigger in screen_triggers):
-            # Ask for confirmation if it's an ambiguous short query
             # Run screen analysis (non-blocking)
+            # DON'T clear text field so user can see their query
             self.analyze_screen_with_query(query)
         else:
             # Clear text field for regular queries
@@ -256,7 +268,7 @@ class SynthMenuBarNative(NSObject):
             try:
                 # Show countdown - ALL UI updates must go through safe_update_result!
                 for i in range(2, 0, -1):
-                    self.safe_update_result(f"📸 Capturing screen in {i} seconds...")
+                    self.safe_update_result(f"📸 CAPTURING SCREEN IN {i} SECONDS...\n\nPlease wait...")
                     time.sleep(1)
                 
                 screenshot_img = self.screen_capture.capture()
@@ -265,11 +277,11 @@ class SynthMenuBarNative(NSObject):
                     try:
                         import pytesseract
                         
-                        self.safe_update_result("🔍 Reading screen content...")
+                        self.safe_update_result("🔍 READING SCREEN CONTENT...\n\nExtracting text from screenshot...")
                         extracted_text = pytesseract.image_to_string(screenshot_img)
                         
                         if extracted_text and len(extracted_text.strip()) > 10:
-                            self.safe_update_result("🧠 Analyzing screen content...")
+                            self.safe_update_result(f"🧠 ANALYZING CONTENT...\n\nProcessing {len(extracted_text.split())} words...")
                             
                             full_query = f"{query}\n\nScreen content:\n{extracted_text[:800]}"
 
@@ -281,13 +293,13 @@ class SynthMenuBarNative(NSObject):
                             self.safe_update_result(result)
                             
                         else:
-                            self.safe_update_result("⚠️ No text detected on screen")
+                            self.safe_update_result("⚠️ NO TEXT DETECTED ON SCREEN\n\nTry opening a document or email with text content.")
                     except ImportError:
-                        self.safe_update_result("❌ OCR not available. Install pytesseract.")
+                        self.safe_update_result("❌ OCR NOT AVAILABLE\n\nPlease install pytesseract:\npip install pytesseract")
                 else:
-                    self.safe_update_result("❌ Screenshot failed")
+                    self.safe_update_result("❌ SCREENSHOT FAILED\n\nUnable to capture screen content.")
             except Exception as e:
-                self.safe_update_result(f"❌ Error: {str(e)}")
+                self.safe_update_result(f"❌ ERROR\n\n{str(e)}")
         
         # Run EVERYTHING in background thread - no freezing!
         thread = threading.Thread(target=capture_and_analyze)
