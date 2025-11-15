@@ -19,6 +19,19 @@ from brain_client import DeltaBrain
 from src.senses.screen_capture import ScreenCapture
 
 
+class TextFieldDelegate(NSObject):
+    """Delegate to handle Enter key in text field"""
+    
+    def textView_doCommandBySelector_(self, textView, selector):
+        # Handle Enter key (insertNewline:)
+        if selector == 'insertNewline:':
+            # Call parent's handleQuery method
+            if hasattr(self, 'parent'):
+                self.parent.handleQuery_(None)
+            return True
+        return False
+
+
 class SynthMenuBarNative(NSObject):
     """Native macOS menu bar with embedded text input"""
     
@@ -53,6 +66,10 @@ class SynthMenuBarNative(NSObject):
     def create_input_view(self):
         """Create custom view with embedded text field and result area"""
         from AppKit import NSTextView, NSScrollView, NSMakeSize, NSBorderlessWindowMask
+        
+        # Create a delegate for handling keyboard events
+        self.text_delegate = TextFieldDelegate.alloc().init()
+        self.text_delegate.parent = self
         
         # Container view - starts tall enough for all elements
         self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 150))
@@ -92,30 +109,37 @@ class SynthMenuBarNative(NSObject):
         scroll_view.setDocumentView_(self.result_view)
         self.scroll_view = scroll_view
         
-        # Text field BELOW result area (always visible at bottom)
-        self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(15, 20, 220, 30))
-        self.text_field.setPlaceholderString_("Ask Synth anything...")
-        self.text_field.setTarget_(self)
-        self.text_field.setAction_("handleQuery:")
+        # Text input - use NSTextView for better cursor visibility and auto-expanding
+        text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(15, 20, 220, 30))
+        text_scroll.setBorderType_(1)  # Line border
+        text_scroll.setHasVerticalScroller_(False)
+        text_scroll.setHasHorizontalScroller_(False)
+        
+        self.text_field = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 220, 30))
         self.text_field.setEditable_(True)
         self.text_field.setSelectable_(True)
-        self.text_field.setBezeled_(True)
-        self.text_field.setBezelStyle_(1)  # Square bezel
-        self.text_field.setDrawsBackground_(True)
-
-        # BRIGHT WHITE background with BLACK text for perfect cursor visibility
-        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 1.0))
-        self.text_field.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.0, 0.0, 0.0, 1.0))
+        self.text_field.setRichText_(False)
         self.text_field.setFont_(NSFont.systemFontOfSize_(13))
-
-        # Force cursor to show - make it visible!
-        self.text_field.setFocusRingType_(1)  # Show focus ring
         
-        # Enable text insertion point (cursor)
+        # PURE WHITE background with PURE BLACK text - cursor will be visible!
+        self.text_field.setBackgroundColor_(NSColor.whiteColor())
+        self.text_field.setTextColor_(NSColor.blackColor())
+        self.text_field.setInsertionPointColor_(NSColor.blackColor())  # Set cursor color!
+        
+        # Enable word wrap for long text
+        self.text_field.setHorizontallyResizable_(False)
+        self.text_field.setVerticallyResizable_(True)
         try:
-            self.text_field.cell().setUsesSingleLineMode_(True)
+            self.text_field.textContainer().setWidthTracksTextView_(True)
+            self.text_field.textContainer().setContainerSize_(NSMakeSize(220, 1000))
         except:
             pass
+        
+        text_scroll.setDocumentView_(self.text_field)
+        self.text_scroll = text_scroll
+        
+        # Set delegate to handle Enter key
+        self.text_field.setDelegate_(self.text_delegate)
 
         # Ask button - ALWAYS VISIBLE at bottom
         self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(240, 20, 55, 30))
@@ -134,7 +158,7 @@ class SynthMenuBarNative(NSObject):
         
         # Add to view - result area on top, controls at bottom
         self.input_view.addSubview_(scroll_view)
-        self.input_view.addSubview_(self.text_field)
+        self.input_view.addSubview_(text_scroll)
         self.input_view.addSubview_(self.ask_button)
         self.input_view.addSubview_(self.clear_button)
         
@@ -165,7 +189,7 @@ class SynthMenuBarNative(NSObject):
         self.scroll_view.setHidden_(True)
         
         # Clear the text field AND make it editable again
-        self.text_field.setStringValue_("")
+        self.text_field.setString_("")
         self.text_field.setEditable_(True)
         
         # Reset to compact height (just controls visible)
@@ -179,7 +203,7 @@ class SynthMenuBarNative(NSObject):
     
     def handleQuery_(self, sender):
         """Handle query from text field"""
-        query = str(self.text_field.stringValue()).strip()
+        query = str(self.text_field.string()).strip()
         
         if not query:
             return
@@ -198,7 +222,7 @@ class SynthMenuBarNative(NSObject):
             self.analyze_screen_with_query(query)
         else:
             # For regular queries, clear text field after reading
-            self.text_field.setStringValue_("")
+            self.text_field.setString_("")
             self.process_query(query)
     
     def expand_view_for_content(self, content_height):
