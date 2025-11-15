@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem, 
                     NSTextField, NSButton, NSView, NSColor, NSFont,
-                    NSNotificationCenter, NSUserNotification, NSUserNotificationCenter)
-from Foundation import NSObject, NSMakeRect
+                    NSNotificationCenter, NSUserNotification, NSUserNotificationCenter,
+                    NSTextView, NSScrollView, NSPasteboard)
+from Foundation import NSObject, NSMakeRect, NSMakeSize
 import objc
 
 # Add project paths
@@ -73,7 +74,6 @@ class SynthMenuBarNative(NSObject):
     
     def create_input_view(self):
         """Create custom view with embedded text field and result area"""
-        from AppKit import NSTextView, NSScrollView, NSMakeSize, NSBorderlessWindowMask
         
         # Create a delegate for handling keyboard events
         self.text_delegate = TextFieldDelegate.alloc().init()
@@ -108,16 +108,17 @@ class SynthMenuBarNative(NSObject):
         except:
             pass
         
-        # Enable CMD+C copying - FIXED!
+        # CRITICAL: Enable CMD+C copying and selection!
         self.result_view.setAllowsUndo_(False)
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         
-        # Enable copy/paste operations
+        # Enable copy operations - disable substitutions
         try:
             self.result_view.setAutomaticTextReplacementEnabled_(False)
             self.result_view.setAutomaticQuoteSubstitutionEnabled_(False)
             self.result_view.setAutomaticDashSubstitutionEnabled_(False)
+            self.result_view.setAutomaticSpellingCorrectionEnabled_(False)
         except:
             pass
         
@@ -126,9 +127,6 @@ class SynthMenuBarNative(NSObject):
             self.result_view.setImportsGraphics_(False)
             self.result_view.setUsesFontPanel_(False)
             self.result_view.setUsesRuler_(False)
-            
-            # CRITICAL: Allow text to be responder for CMD+C
-            self.result_view.setAcceptsFirstResponder_(True)
             
             # Word wrap and padding
             self.result_view.textContainer().setWidthTracksTextView_(True)
@@ -159,6 +157,19 @@ class SynthMenuBarNative(NSObject):
         
         # BRIGHT CYAN/BLUE CURSOR - VERY VISIBLE!
         self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(0.3, 0.8, 1.0, 1.0))
+        
+        # CRITICAL: Enable copy/paste functionality!
+        self.text_field.setAllowsUndo_(True)
+        self.text_field.setUsesFindBar_(True)
+        
+        # Disable auto-substitutions (they interfere with copy/paste)
+        try:
+            self.text_field.setAutomaticTextReplacementEnabled_(False)
+            self.text_field.setAutomaticQuoteSubstitutionEnabled_(False)
+            self.text_field.setAutomaticDashSubstitutionEnabled_(False)
+            self.text_field.setAutomaticSpellingCorrectionEnabled_(False)
+        except:
+            pass
         
         # Rounded corners!
         try:
@@ -195,7 +206,6 @@ class SynthMenuBarNative(NSObject):
         self.ask_button.setFont_(NSFont.systemFontOfSize_(12))
         # Blue accent color for Ask button
         try:
-            from AppKit import NSBezelStyle
             self.ask_button.setBezelStyle_(4)  # Rounded rect
         except:
             pass
@@ -344,7 +354,6 @@ The plugin will automatically activate when relevant to your query."""
     
     def copyResults_(self, sender):
         """Copy the result text to clipboard"""
-        from AppKit import NSPasteboard
         
         result_text = str(self.result_view.string())
         if result_text:
@@ -392,7 +401,6 @@ The plugin will automatically activate when relevant to your query."""
     
     def expand_view_for_content(self, content_height):
         """Expand the view to fit content"""
-        from AppKit import NSMakeRect
         
         # Calculate new total height
         result_height = min(240, max(80, content_height))
