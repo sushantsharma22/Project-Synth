@@ -1,12 +1,12 @@
 """
-🎯 SYNTH MENU BAR APP 🎯
-macOS Menu Bar Application with Transparent Dropdown
+🎯 SYNTH MENU BAR APP - SIRI STYLE 🎯
+macOS Menu Bar Application with Siri-like Interface
 
 Features:
-- Icon in menu bar (near WiFi)
-- Transparent floating panel on click
-- Auto-detect clipboard/selected text
-- Query input with smart suggestions
+- Clean text input like Siri
+- Smart context detection from screen
+- Action buttons on right side
+- Natural language processing
 - Direct integration with Brain + Plugins
 
 Author: Sushant Sharma
@@ -17,10 +17,10 @@ import rumps
 import pyperclip
 from pathlib import Path
 from datetime import datetime
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QLabel, QListWidget, QListWidgetItem,
-                             QPushButton, QTextEdit)
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint
+                             QPushButton, QTextEdit, QScrollArea)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QColor, QPalette
 
 # Add project paths
@@ -34,13 +34,15 @@ from src.senses.screen_capture import ScreenCapture
 
 
 class FloatingPanel(QMainWindow):
-    """Transparent floating panel for queries"""
+    """Siri-like floating panel for natural queries"""
     
     def __init__(self):
         super().__init__()
         self.brain = DeltaBrain()
+        self.screen_capture = ScreenCapture()
         self.init_plugins()
         self.init_ui()
+        self.detected_context = ""
         
     def init_plugins(self):
         """Initialize plugin system"""
@@ -49,9 +51,9 @@ class FloatingPanel(QMainWindow):
         self.plugin_manager.load_all_plugins()
         
     def init_ui(self):
-        """Setup the floating panel UI"""
+        """Setup the Siri-like floating panel UI"""
         # Window settings
-        self.setWindowTitle("Synth Assistant")
+        self.setWindowTitle("Synth")
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.FramelessWindowHint |
@@ -59,255 +61,418 @@ class FloatingPanel(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Size and position
-        self.setGeometry(100, 100, 500, 400)
+        # Larger size for Siri-like interface
+        self.setGeometry(100, 100, 700, 450)
         
         # Main widget
         main_widget = QWidget()
         main_widget.setStyleSheet("""
             QWidget {
-                background-color: rgba(30, 30, 30, 240);
-                border-radius: 15px;
-                padding: 15px;
+                background-color: rgba(20, 20, 25, 250);
+                border-radius: 20px;
             }
         """)
         self.setCentralWidget(main_widget)
         
-        # Layout
-        layout = QVBoxLayout()
-        layout.setSpacing(10)
+        # Main horizontal layout
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
         
-        # Title
-        title = QLabel("🧠 Synth Assistant")
-        title.setStyleSheet("""
+        # Left side - Main input area
+        left_layout = QVBoxLayout()
+        left_layout.setSpacing(15)
+        
+        # Siri-like orb/title
+        title_container = QHBoxLayout()
+        orb_label = QLabel("🧠")
+        orb_label.setStyleSheet("""
             QLabel {
                 color: white;
-                font-size: 18px;
+                font-size: 40px;
+                background: transparent;
+            }
+        """)
+        title_label = QLabel("Synth")
+        title_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 24px;
+                font-weight: 300;
+                background: transparent;
+            }
+        """)
+        title_container.addWidget(orb_label)
+        title_container.addWidget(title_label)
+        title_container.addStretch()
+        left_layout.addLayout(title_container)
+        
+        # Context detection label (shows what Synth sees)
+        self.context_label = QLabel("Analyzing screen context...")
+        self.context_label.setStyleSheet("""
+            QLabel {
+                color: rgba(150, 150, 255, 200);
+                font-size: 12px;
+                background: transparent;
+                padding: 5px;
+                font-style: italic;
+            }
+        """)
+        self.context_label.setWordWrap(True)
+        left_layout.addWidget(self.context_label)
+        
+        # Main query input (Siri-like)
+        self.query_input = QTextEdit()
+        self.query_input.setPlaceholderText("What would you like me to do?")
+        self.query_input.setStyleSheet("""
+            QTextEdit {
+                background-color: rgba(40, 40, 50, 180);
+                color: white;
+                border: none;
+                border-radius: 12px;
+                padding: 15px;
+                font-size: 16px;
+                font-weight: 300;
+            }
+            QTextEdit:focus {
+                background-color: rgba(50, 50, 60, 200);
+            }
+        """)
+        self.query_input.setMaximumHeight(120)
+        left_layout.addWidget(self.query_input)
+        
+        # Example prompts
+        examples_label = QLabel("💡 Try: \"Draft an email about...\" or \"Analyze this code\" or \"What's on screen?\"")
+        examples_label.setStyleSheet("""
+            QLabel {
+                color: rgba(120, 120, 130, 180);
+                font-size: 11px;
+                background: transparent;
+                padding: 5px;
+            }
+        """)
+        examples_label.setWordWrap(True)
+        left_layout.addWidget(examples_label)
+        
+        # Response display
+        response_label = QLabel("Response:")
+        response_label.setStyleSheet("""
+            QLabel {
+                color: rgba(180, 180, 200, 200);
+                font-size: 12px;
+                background: transparent;
+                font-weight: bold;
+            }
+        """)
+        left_layout.addWidget(response_label)
+        
+        self.result_display = QTextEdit()
+        self.result_display.setReadOnly(True)
+        self.result_display.setStyleSheet("""
+            QTextEdit {
+                background-color: rgba(30, 30, 40, 150);
+                color: rgba(100, 200, 255, 255);
+                border: 1px solid rgba(70, 70, 90, 100);
+                border-radius: 10px;
+                padding: 12px;
+                font-size: 13px;
+                line-height: 1.5;
+            }
+        """)
+        left_layout.addWidget(self.result_display)
+        
+        # Bottom controls
+        bottom_controls = QHBoxLayout()
+        
+        analyze_btn = QPushButton("✨ Analyze (⏎)")
+        analyze_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(74, 144, 226, 200);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 12px 24px;
+                font-size: 14px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: rgba(94, 164, 246, 230);
+            }
+            QPushButton:pressed {
+                background-color: rgba(54, 124, 206, 200);
+            }
+        """)
+        analyze_btn.clicked.connect(self.process_query)
+        
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(60, 60, 70, 150);
+                color: rgba(200, 200, 210, 200);
+                border: none;
+                border-radius: 8px;
+                padding: 12px 20px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: rgba(80, 80, 90, 180);
+            }
+        """)
+        clear_btn.clicked.connect(self.clear_all)
+        
+        close_btn = QPushButton("✕")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: rgba(200, 200, 210, 150);
+                border: none;
+                padding: 10px 15px;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                color: rgba(255, 100, 100, 200);
+            }
+        """)
+        close_btn.clicked.connect(self.hide)
+        
+        bottom_controls.addWidget(analyze_btn)
+        bottom_controls.addWidget(clear_btn)
+        bottom_controls.addStretch()
+        bottom_controls.addWidget(close_btn)
+        
+        left_layout.addLayout(bottom_controls)
+        
+        # Right side - Quick Actions Panel
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(10)
+        
+        actions_title = QLabel("Quick Actions")
+        actions_title.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 13px;
                 font-weight: bold;
                 background: transparent;
                 padding: 5px;
             }
         """)
-        layout.addWidget(title)
+        right_layout.addWidget(actions_title)
         
-        # Context label (shows what's detected)
-        self.context_label = QLabel("📋 Auto-detecting context...")
-        self.context_label.setStyleSheet("""
-            QLabel {
-                color: #888;
-                font-size: 12px;
-                background: transparent;
-                padding: 5px;
-            }
-        """)
-        layout.addWidget(self.context_label)
+        # Action buttons with icons
+        self.create_action_button("📧 Draft Email", self.draft_email, right_layout)
+        self.create_action_button("📝 Summarize", self.summarize_content, right_layout)
+        self.create_action_button("💻 Explain Code", self.explain_code, right_layout)
+        self.create_action_button("🔍 Web Search", self.web_search, right_layout)
+        self.create_action_button("📅 Add to Calendar", self.add_calendar, right_layout)
+        self.create_action_button("🔐 Security Check", self.security_check, right_layout)
+        self.create_action_button("📊 Analyze Screen", self.analyze_screen, right_layout)
+        self.create_action_button("🎨 Get Creative", self.creative_mode, right_layout)
         
-        # Query input
-        self.query_input = QLineEdit()
-        self.query_input.setPlaceholderText("Ask anything or press Enter to analyze...")
-        self.query_input.setStyleSheet("""
-            QLineEdit {
-                background-color: rgba(50, 50, 50, 200);
-                color: white;
-                border: 2px solid #555;
-                border-radius: 8px;
-                padding: 12px;
-                font-size: 14px;
-            }
-            QLineEdit:focus {
-                border: 2px solid #4a9eff;
-            }
-        """)
-        self.query_input.returnPressed.connect(self.process_query)
-        layout.addWidget(self.query_input)
+        right_layout.addStretch()
         
-        # Quick actions
-        actions_label = QLabel("💡 Quick Actions:")
-        actions_label.setStyleSheet("""
-            QLabel {
-                color: #aaa;
-                font-size: 11px;
-                background: transparent;
-                padding: 3px;
-            }
-        """)
-        layout.addWidget(actions_label)
+        # Add both sides to main layout
+        main_layout.addLayout(left_layout, 2)  # Left takes 2/3
+        main_layout.addLayout(right_layout, 1)  # Right takes 1/3
         
-        # Suggestions list
-        self.suggestions_list = QListWidget()
-        self.suggestions_list.setStyleSheet("""
-            QListWidget {
-                background-color: rgba(40, 40, 40, 200);
-                color: white;
-                border: 1px solid #555;
-                border-radius: 8px;
-                padding: 5px;
-                font-size: 13px;
-            }
-            QListWidget::item {
-                padding: 8px;
-                border-radius: 5px;
-                margin: 2px;
-            }
-            QListWidget::item:hover {
-                background-color: rgba(70, 70, 70, 200);
-            }
-            QListWidget::item:selected {
-                background-color: rgba(74, 158, 255, 150);
-            }
-        """)
-        self.suggestions_list.itemDoubleClicked.connect(self.execute_suggestion)
-        layout.addWidget(self.suggestions_list)
-        
-        # Result display
-        self.result_display = QTextEdit()
-        self.result_display.setReadOnly(True)
-        self.result_display.setMaximumHeight(100)
-        self.result_display.setStyleSheet("""
-            QTextEdit {
-                background-color: rgba(40, 40, 40, 200);
-                color: #4a9eff;
-                border: 1px solid #555;
-                border-radius: 8px;
-                padding: 8px;
-                font-size: 12px;
-            }
-        """)
-        layout.addWidget(self.result_display)
-        
-        # Close button
-        close_btn = QPushButton("✕ Close (Esc)")
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(80, 80, 80, 200);
-                color: white;
-                border: none;
-                border-radius: 5px;
-                padding: 8px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: rgba(100, 100, 100, 200);
-            }
-        """)
-        close_btn.clicked.connect(self.hide)
-        layout.addWidget(close_btn)
-        
-        main_widget.setLayout(layout)
+        main_widget.setLayout(main_layout)
         
         # Auto-detect timer
         self.detect_timer = QTimer()
-        self.detect_timer.timeout.connect(self.auto_detect)
-        self.detect_timer.start(1000)  # Check every second
-        
-    def auto_detect(self):
-        """Auto-detect clipboard and provide suggestions"""
+        self.detect_timer.timeout.connect(self.auto_detect_context)
+        self.detect_timer.start(2000)  # Check every 2 seconds
+    
+    def create_action_button(self, text, callback, layout):
+        """Create a styled action button"""
+        btn = QPushButton(text)
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(50, 50, 60, 150);
+                color: white;
+                border: 1px solid rgba(80, 80, 100, 100);
+                border-radius: 8px;
+                padding: 10px 15px;
+                font-size: 12px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: rgba(70, 70, 90, 200);
+                border: 1px solid rgba(100, 150, 255, 150);
+            }
+            QPushButton:pressed {
+                background-color: rgba(90, 90, 110, 220);
+            }
+        """)
+        btn.clicked.connect(callback)
+        layout.addWidget(btn)
+        return btn
+    
+    def auto_detect_context(self):
+        """Auto-detect context from clipboard and screen"""
         try:
+            # Get clipboard
             clipboard_text = pyperclip.paste()
             
-            if not clipboard_text or len(clipboard_text.strip()) < 3:
-                self.context_label.setText("📋 Clipboard empty - Copy something to analyze")
-                return
-            
-            # Show what's detected
-            preview = clipboard_text[:60].replace('\n', ' ')
-            self.context_label.setText(f"📋 Detected: {preview}...")
-            
-            # Get plugin suggestions
-            context = PluginContext(clipboard_text=clipboard_text)
-            suggestions = self.plugin_manager.get_suggestions(context)
-            
-            # Update suggestions list
-            self.suggestions_list.clear()
-            for sug in suggestions[:8]:  # Top 8 suggestions
-                item = QListWidgetItem(f"{sug.title} ({sug.confidence:.0%})")
-                item.setData(Qt.ItemDataRole.UserRole, sug)
-                self.suggestions_list.addItem(item)
+            if clipboard_text and len(clipboard_text.strip()) > 3:
+                preview = clipboard_text[:100].replace('\n', ' ')
+                self.detected_context = clipboard_text
+                self.context_label.setText(f"📋 Clipboard: {preview}...")
+            else:
+                self.context_label.setText("👀 Ready to analyze screen or clipboard...")
+                self.detected_context = ""
             
         except Exception as e:
-            self.context_label.setText(f"⚠️ Error: {str(e)[:50]}")
+            self.context_label.setText(f"⚠️ Context detection paused")
     
     def process_query(self):
-        """Process user query with Brain"""
-        query = self.query_input.text().strip()
+        """Process user query with Brain AI"""
+        query = self.query_input.toPlainText().strip()
+        
+        # Build full context
+        full_context = ""
+        if self.detected_context:
+            full_context = f"Context from clipboard:\n{self.detected_context}\n\n"
         
         if not query:
-            # No query - just analyze clipboard
-            clipboard_text = pyperclip.paste()
-            if clipboard_text:
-                query = f"Analyze this and suggest next steps:\n\n{clipboard_text[:500]}"
-            else:
-                self.result_display.setText("❌ Nothing to analyze")
-                return
+            self.result_display.setText("💬 Please type what you'd like me to do...")
+            return
         
-        self.result_display.setText("🧠 Brain is thinking...")
+        # Combine query with context
+        final_query = full_context + "User request: " + query
+        
+        self.result_display.setText("🧠 Thinking...")
         QApplication.processEvents()
         
         try:
-            # Ask Brain
-            response = self.brain.ask(query, mode="balanced")
-            
-            # Show result
-            preview = response[:300].replace('\n', ' ')
-            self.result_display.setText(f"✅ Brain: {preview}...")
-            
-            # Also get plugin suggestions based on response
-            context = PluginContext(clipboard_text=query + "\n" + response)
-            suggestions = self.plugin_manager.get_suggestions(context)
-            
-            self.suggestions_list.clear()
-            for sug in suggestions[:8]:
-                item = QListWidgetItem(f"💡 {sug.title}")
-                item.setData(Qt.ItemDataRole.UserRole, sug)
-                self.suggestions_list.addItem(item)
+            # Ask Brain AI
+            response = self.brain.ask(final_query, mode="balanced")
+            self.result_display.setText(response)
             
         except Exception as e:
-            self.result_display.setText(f"❌ Error: {str(e)[:100]}")
+            self.result_display.setText(f"❌ Error: {str(e)}")
     
-    def execute_suggestion(self, item):
-        """Execute a selected suggestion"""
-        suggestion = item.data(Qt.ItemDataRole.UserRole)
-        self.result_display.setText(f"🚀 Executing: {suggestion.title}\n{suggestion.description}")
+    def clear_all(self):
+        """Clear all inputs and outputs"""
+        self.query_input.clear()
+        self.result_display.clear()
+        self.detected_context = ""
+        self.context_label.setText("👀 Ready for your next request...")
+    
+    # Quick Action Handlers
+    def draft_email(self):
+        """Draft an email based on context"""
+        context = self.detected_context or "the current situation"
+        self.query_input.setText(f"Draft a professional email about: {context}")
+        self.process_query()
+    
+    def summarize_content(self):
+        """Summarize clipboard or screen content"""
+        if self.detected_context:
+            self.query_input.setText("Summarize this in 3-5 bullet points")
+            self.process_query()
+        else:
+            self.result_display.setText("📋 Please copy some text first, then click Summarize")
+    
+    def explain_code(self):
+        """Explain code from clipboard"""
+        if self.detected_context:
+            self.query_input.setText("Explain this code in simple terms. What does it do?")
+            self.process_query()
+        else:
+            self.result_display.setText("💻 Please copy some code first, then click Explain Code")
+    
+    def web_search(self):
+        """Perform web search"""
+        query = self.query_input.toPlainText().strip() or self.detected_context
+        if query:
+            self.result_display.setText(f"🔍 Searching web for: {query[:100]}...")
+            # TODO: Integrate with web_search_plugin
+        else:
+            self.result_display.setText("🔍 Please type or paste what you want to search for")
+    
+    def add_calendar(self):
+        """Add event to calendar"""
+        context = self.detected_context or self.query_input.toPlainText().strip()
+        if context:
+            self.query_input.setText(f"Create a calendar event from this: {context}")
+            self.process_query()
+        else:
+            self.result_display.setText("📅 Please describe the event you want to add")
+    
+    def security_check(self):
+        """Run security analysis"""
+        if self.detected_context:
+            self.query_input.setText("Analyze this for security issues, vulnerabilities, or suspicious content")
+            self.process_query()
+        else:
+            self.result_display.setText("🔐 Please copy text/code to analyze for security")
+    
+    def analyze_screen(self):
+        """Capture and analyze current screen"""
+        self.result_display.setText("📸 Capturing screen...")
+        QApplication.processEvents()
+        
+        try:
+            # Take screenshot
+            screenshot_path = self.screen_capture.capture_region()
+            
+            if screenshot_path:
+                self.result_display.setText(f"� Screenshot saved! Analyzing...\n\nPath: {screenshot_path}")
+                # TODO: Add OCR and analysis
+            else:
+                self.result_display.setText("❌ Screenshot cancelled")
+                
+        except Exception as e:
+            self.result_display.setText(f"❌ Error capturing screen: {str(e)}")
+    
+    def creative_mode(self):
+        """Creative/brainstorming mode"""
+        context = self.query_input.toPlainText().strip() or self.detected_context
+        if context:
+            self.query_input.setText(f"Give me creative ideas and suggestions for: {context}")
+            self.process_query()
+        else:
+            self.result_display.setText("🎨 Tell me what you want creative ideas for!")
     
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts"""
         if event.key() == Qt.Key.Key_Escape:
             self.hide()
-        elif event.key() == Qt.Key.Key_Return and not self.query_input.hasFocus():
-            self.process_query()
+        elif (event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter):
+            if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+                self.process_query()
     
     def show_panel(self):
-        """Show panel at cursor position"""
-        # Position near top-right (like menu bar dropdown)
+        """Show panel at cursor position with animation"""
+        # Position near top-right (like Siri/Spotlight)
         screen = QApplication.primaryScreen().geometry()
-        x = screen.width() - self.width() - 50
-        y = 50
+        x = (screen.width() - self.width()) // 2  # Center horizontally
+        y = 80  # Near top
         self.move(x, y)
         self.show()
         self.query_input.setFocus()
-        self.auto_detect()  # Immediate detection
+        self.auto_detect_context()  # Immediate detection
 
 
 class SynthMenuBar(rumps.App):
     """macOS Menu Bar Application"""
     
     def __init__(self):
+        # Simple icon without emoji to avoid double icon issue
         super().__init__(
-            "🧠",  # Shows brain emoji as title
+            "Synth",  # Simple text title
             quit_button=None
         )
         
         # Menu items
         self.menu = [
-            rumps.MenuItem("Open Assistant", callback=self.open_panel),
+            rumps.MenuItem("Open Synth", callback=self.open_panel),
             rumps.separator,
             rumps.MenuItem("Quick Analyze", callback=self.quick_analyze),
             rumps.MenuItem("Screenshot + Analyze", callback=self.screenshot_analyze),
             rumps.separator,
-            rumps.MenuItem("Settings", callback=self.show_settings),
-            rumps.MenuItem("About", callback=self.show_about),
+            rumps.MenuItem("About Synth", callback=self.show_about),
             rumps.separator,
-            rumps.MenuItem("Quit Synth", callback=self.quit_app)
+            rumps.MenuItem("Quit", callback=self.quit_app)
         ]
         
         # Initialize Qt app for floating panel
@@ -322,42 +487,34 @@ class SynthMenuBar(rumps.App):
         """Quick clipboard analysis"""
         clipboard = pyperclip.paste()
         if clipboard:
-            rumps.notification(
-                "Synth",
-                "Analyzing clipboard...",
-                f"{clipboard[:50]}...",
-                sound=False
-            )
+            self.panel.detected_context = clipboard
+            self.panel.query_input.setText("Analyze and explain this")
             self.panel.show_panel()
+            self.panel.process_query()
         else:
-            rumps.alert("Clipboard is empty", "Copy something first!")
+            rumps.alert("Clipboard Empty", "Copy something first, then try Quick Analyze")
     
     def screenshot_analyze(self, _):
         """Take screenshot and analyze"""
-        rumps.notification(
-            "Synth",
-            "Taking screenshot...",
-            "Smile! 📸",
-            sound=False
-        )
-        # TODO: Implement screenshot + OCR
+        self.panel.show_panel()
+        self.panel.analyze_screen()
         
-    def show_settings(self, _):
-        """Show settings"""
-        rumps.alert("Settings", "Settings panel coming soon!")
-    
     def show_about(self, _):
         """Show about dialog"""
         rumps.alert(
             "Synth - AI Assistant",
             "Your intelligent macOS companion\n\n"
-            "Version: 1.0.0\n"
+            "Version: 2.0.0\n"
             "Author: Sushant Sharma\n\n"
             "Features:\n"
+            "• Siri-like natural language interface\n"
             "• AI-powered analysis (Ollama)\n"
             "• 8 intelligent plugins\n"
-            "• Real-time suggestions\n"
-            "• OCR & screenshot analysis"
+            "• Smart context detection\n"
+            "• OCR & screenshot analysis\n\n"
+            "Usage:\n"
+            "Click 'Open Synth' or use the menu bar icon\n"
+            "Type what you want, or use Quick Actions"
         )
     
     def quit_app(self, _):
