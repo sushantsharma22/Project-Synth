@@ -1,0 +1,80 @@
+# Personal Documentation (Keep Private)
+SETUP_DOCUMENTATION.md
+QUICK_START.md
+AUTO_CONNECT_README.md
+
+# Sensitive Configuration
+*.plist
+*_key.sh
+*_auto.sh
+deprecated/
+
+# SSH Keys (Never commit)
+*.pem
+*.key
+id_*
+*.pub
+
+# Passwords & Secrets
+.env
+.env.*
+*password*
+*secret*
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project Specific
+code_analyzer/
+data/
+models/
+brain.docx
+~$*.docx
+
+# Test outputs
+test_output/
+*.test.log
