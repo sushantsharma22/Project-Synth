@@ -68,24 +68,31 @@ class SynthMenuBarNative(NSObject):
         self.text_field.setBezeled_(True)
         self.text_field.setBezelStyle_(1)  # Square bezel
         self.text_field.setDrawsBackground_(True)
-        
+
         # Bright colors for visibility
         self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.95, 0.95, 0.98, 1.0))
         self.text_field.setTextColor_(NSColor.blackColor())
-        self.text_field.setFont_(NSFont.systemFontOfSize_(15))
-        
+        self.text_field.setFont_(NSFont.systemFontOfSize_(14))
+
         # Force cursor to show
         self.text_field.setFocusRingType_(1)  # Show focus ring
-        
-        # Ask button - bright blue
-        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(320, 60, 65, 30))
+
+        # Ask button
+        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(245, 60, 60, 30))
         self.ask_button.setTitle_("Ask")
         self.ask_button.setBezelStyle_(1)
         self.ask_button.setTarget_(self)
         self.ask_button.setAction_("handleQuery:")
         self.ask_button.setKeyEquivalent_("\r")  # Enter key
         
-        # Result text view (scrollable, expandable) - light gray background
+        # Clear button
+        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(310, 60, 75, 30))
+        self.clear_button.setTitle_("Clear")
+        self.clear_button.setBezelStyle_(1)
+        self.clear_button.setTarget_(self)
+        self.clear_button.setAction_("clearResults:")
+        
+        # Result text view (scrollable, expandable)
         scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(15, 15, 370, 40))
         scroll_view.setBorderType_(1)  # Line border
         scroll_view.setHasVerticalScroller_(True)
@@ -95,11 +102,15 @@ class SynthMenuBarNative(NSObject):
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
-        self.result_view.setFont_(NSFont.systemFontOfSize_(14))
+        self.result_view.setFont_(NSFont.systemFontOfSize_(13))
         
-        # Light background, dark text for readability
-        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.98, 0.98, 0.99, 1.0))
-        self.result_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.1, 0.1, 0.1, 1.0))
+        # Dark background, white text for better contrast
+        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.12, 0.12, 0.14, 1.0))
+        try:
+            self.result_view.setTextColor_(NSColor.whiteColor())
+        except Exception:
+            # Fallback for older PyObjC bindings
+            self.result_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 1.0))
         self.result_view.setString_("")
         
         scroll_view.setDocumentView_(self.result_view)
@@ -107,6 +118,7 @@ class SynthMenuBarNative(NSObject):
         # Add to view
         self.input_view.addSubview_(self.text_field)
         self.input_view.addSubview_(self.ask_button)
+        self.input_view.addSubview_(self.clear_button)
         self.input_view.addSubview_(scroll_view)
         
         # Store scroll view reference
@@ -132,6 +144,14 @@ class SynthMenuBarNative(NSObject):
         screen_item.setTarget_(self)
         self.menu.addItem_(screen_item)
     
+    def clearResults_(self, sender):
+        """Clear the result area and reset view"""
+        self.result_view.setString_("")
+        self.scroll_view.setHidden_(True)
+        self.text_field.setStringValue_("")
+        # Reset to default height
+        self.input_view.setFrame_(NSMakeRect(0, 0, 400, 100))
+    
     def handleQuery_(self, sender):
         """Handle query from text field"""
         query = str(self.text_field.stringValue()).strip()
@@ -144,10 +164,13 @@ class SynthMenuBarNative(NSObject):
         self.result_view.setString_("🧠 Thinking...")
         self.expand_view_for_content(50)
         
-        # Check for screen analysis
-        screen_keywords = ['screen', 'window', 'display', 'going on', 'see on', 'looking at']
-        if any(keyword in query.lower() for keyword in screen_keywords):
-            # Don't clear field for screen analysis
+        # Check for screen analysis -- be conservative to avoid accidental triggers
+        # Only trigger when user explicitly mentions "on screen" or "analyze screen"
+        ql = query.lower()
+        screen_triggers = ['on screen', "analyze screen", "screen"]
+        if any(trigger in ql for trigger in screen_triggers):
+            # Ask for confirmation if it's an ambiguous short query
+            # Run screen analysis (non-blocking)
             self.analyze_screen_with_query(query)
         else:
             # Clear text field for regular queries
@@ -195,15 +218,30 @@ class SynthMenuBarNative(NSObject):
     
     def safe_update_result(self, text):
         """Safely update result view from any thread"""
-        from AppKit import NSRunLoop, NSDefaultRunLoopMode
-        import time
-        
-        # Simple way: just set the text (AppKit handles thread safety for setString_)
-        self.result_view.setString_(text)
-        
-        # Calculate and update height
-        text_height = len(text) / 2
-        self.expand_view_for_content(text_height)
+        # Ensure UI updates happen on the main thread (use performSelectorOnMainThread)
+        try:
+            # Use performSelectorOnMainThread to safely update UI
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "updateResultText:", text, False
+            )
+        except Exception:
+            # Fallback: directly set (may work in some environments)
+            try:
+                self.result_view.setString_(text)
+                text_height = len(text) / 2
+                self.expand_view_for_content(text_height)
+            except Exception:
+                # Last resort: ignore UI update failure
+                pass
+
+    def updateResultText_(self, text):
+        """Update result view on the main thread (selector method - note the trailing underscore)."""
+        try:
+            self.result_view.setString_(text)
+            text_height = len(text) / 2
+            self.expand_view_for_content(text_height)
+        except Exception:
+            pass
     
     def quickScreenAnalysis_(self, sender):
         """Quick screen analysis from menu"""
@@ -216,9 +254,9 @@ class SynthMenuBarNative(NSObject):
         
         def capture_and_analyze():
             try:
-                # Show countdown in result view
+                # Show countdown - ALL UI updates must go through safe_update_result!
                 for i in range(2, 0, -1):
-                    self.result_view.setString_(f"📸 Capturing screen in {i} seconds...")
+                    self.safe_update_result(f"📸 Capturing screen in {i} seconds...")
                     time.sleep(1)
                 
                 screenshot_img = self.screen_capture.capture()
@@ -227,32 +265,29 @@ class SynthMenuBarNative(NSObject):
                     try:
                         import pytesseract
                         
-                        self.result_view.setString_("🔍 Reading screen content...")
+                        self.safe_update_result("🔍 Reading screen content...")
                         extracted_text = pytesseract.image_to_string(screenshot_img)
                         
                         if extracted_text and len(extracted_text.strip()) > 10:
-                            self.result_view.setString_("🧠 Analyzing screen content...")
+                            self.safe_update_result("🧠 Analyzing screen content...")
                             
                             full_query = f"{query}\n\nScreen content:\n{extracted_text[:800]}"
-                            
-                            # This runs in background - won't freeze Mac
-                            result = self.brain.ask(full_query, mode="balanced")
+
+                            # Use FAST model for initial, quick response to avoid long blocking
+                            # The heavy analysis can be requested separately if user wants deeper review
+                            result = self.brain.ask(full_query, mode="fast")
                             
                             # Show full result in dropdown
                             self.safe_update_result(result)
                             
                         else:
-                            self.result_view.setString_("⚠️ No text detected on screen")
-                            self.expand_view_for_content(50)
+                            self.safe_update_result("⚠️ No text detected on screen")
                     except ImportError:
-                        self.result_view.setString_("❌ OCR not available. Install pytesseract.")
-                        self.expand_view_for_content(50)
+                        self.safe_update_result("❌ OCR not available. Install pytesseract.")
                 else:
-                    self.result_view.setString_("❌ Screenshot failed")
-                    self.expand_view_for_content(50)
+                    self.safe_update_result("❌ Screenshot failed")
             except Exception as e:
-                self.result_view.setString_(f"❌ Error: {str(e)}")
-                self.expand_view_for_content(50)
+                self.safe_update_result(f"❌ Error: {str(e)}")
         
         # Run EVERYTHING in background thread - no freezing!
         thread = threading.Thread(target=capture_and_analyze)

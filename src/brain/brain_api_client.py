@@ -216,17 +216,24 @@ What action should I take to help the user?"""
         # if include_image:
         #     payload['images'] = [image_base64]
         
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=self.timeout
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            return data.get('response', '')
-        else:
-            raise Exception(f"Ollama API error: {response.status_code}")
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=self.timeout
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('response', '')
+            else:
+                raise Exception(f"Ollama API error: {response.status_code}")
+        except requests.exceptions.Timeout:
+            raise Exception(f"Request timeout after {self.timeout}s - Brain may be overloaded")
+        except requests.exceptions.ConnectionError:
+            raise Exception(f"Connection failed - Is Brain running? Check SSH tunnel on port {port}")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Request error: {str(e)}")
     
     def _parse_response(self,
                        response_text: str,

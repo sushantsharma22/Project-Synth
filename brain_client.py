@@ -58,8 +58,14 @@ class DeltaBrain:
                 "stream": False
             }, timeout=90)
             return response.json()["response"]
+        except requests.exceptions.Timeout:
+            return f"Timeout Error: Brain took longer than 90 seconds to respond.\nTry using 'fast' mode or check if Brain is overloaded."
+        except requests.exceptions.ConnectionError:
+            return f"Connection Error: Cannot connect to Brain on port {port}.\nMake sure SSH tunnel is active with: ./brain_monitor_key.sh"
         except requests.exceptions.RequestException as e:
             return f"Connection Error: {str(e)}\nMake sure SSH tunnel is active!"
+        except KeyError:
+            return f"Error: Invalid response from Brain. The model may not be loaded."
         except Exception as e:
             return f"Error: {str(e)}"
     

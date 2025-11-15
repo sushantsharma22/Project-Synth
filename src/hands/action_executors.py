@@ -143,12 +143,13 @@ class SearchFileExecutor(ActionExecutor):
     def execute(self, query: str, **kwargs) -> ActionResult:
         """Search for files using Spotlight."""
         try:
-            # Use mdfind (Spotlight command line)
+            # Use mdfind (Spotlight command line) with timeout
+            # Limit results to prevent overwhelming the system
             result_proc = subprocess.run(
-                ['mdfind', '-name', query],
+                ['mdfind', '-name', query, '-limit', '10'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=3  # Reduced timeout to prevent hanging
             )
             
             files = result_proc.stdout.strip().split('\n')
