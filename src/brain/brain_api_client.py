@@ -68,12 +68,12 @@ class BrainAPIClient:
         """
         self.host = host
         self.timeout = timeout
-        self.stats = {
-            'total_requests': 0,
-            'successful_requests': 0,
-            'failed_requests': 0,
-            'avg_response_time_ms': 0,
-            'total_response_time_ms': 0
+        self.stats: Dict[str, float] = {
+            'total_requests': 0.0,
+            'successful_requests': 0.0,
+            'failed_requests': 0.0,
+            'avg_response_time_ms': 0.0,
+            'total_response_time_ms': 0.0
         }
     
     def analyze_context(self, 

@@ -37,26 +37,42 @@ class DeltaBrain:
             "smart": "qwen2.5:14b"
         }
     
-    def ask(self, prompt, mode="balanced"):
+    def ask(self, prompt, mode="balanced", max_tokens=None):
         """Send question to Brain
         
         Args:
             prompt: Your question or request
             mode: "fast", "balanced", or "smart"
+            max_tokens: Optional max tokens for response (None = unlimited)
             
         Returns:
             AI response as string
         """
+        # Auto-detect if response should be concise
+        prompt_lower = prompt.lower()
+        instruction_keywords = ['concise', 'brief', 'short', 'quick', 'summary', 'tldr']
+        is_concise_request = any(keyword in prompt_lower for keyword in instruction_keywords)
+        
+        # Set max_tokens based on instruction detection if not explicitly provided
+        if max_tokens is None and is_concise_request:
+            max_tokens = 256  # Limit to ~256 tokens for concise responses
+        
         port = self.ports[mode]
         model = self.models[mode]
         url = f"http://{self.host}:{port}/api/generate"
         
         try:
-            response = requests.post(url, json={
+            payload = {
                 "model": model,
                 "prompt": prompt,
                 "stream": False
-            }, timeout=90)
+            }
+            
+            # Add max_tokens if specified
+            if max_tokens:
+                payload["options"] = {"num_predict": max_tokens}
+            
+            response = requests.post(url, json=payload, timeout=90)
             return response.json()["response"]
         except requests.exceptions.Timeout:
             return f"Timeout Error: Brain took longer than 90 seconds to respond.\nTry using 'fast' mode or check if Brain is overloaded."
@@ -68,6 +84,36 @@ class DeltaBrain:
             return f"Error: Invalid response from Brain. The model may not be loaded."
         except Exception as e:
             return f"Error: {str(e)}"
+    
+    def ask_with_context(self, question, context_chunks, mode="balanced", max_tokens=None):
+        """Ask a question with retrieved context chunks (RAG pattern)
+        
+        Args:
+            question: The user's question
+            context_chunks: List of relevant context strings from RAG
+            mode: "fast", "balanced", or "smart"
+            max_tokens: Optional max tokens for response
+            
+        Returns:
+            AI response incorporating the context
+        """
+        # Build enhanced prompt with context
+        context_text = "\n\n".join([
+            f"Context {i+1}:\n{chunk}" 
+            for i, chunk in enumerate(context_chunks)
+        ])
+        
+        enhanced_prompt = f"""Based on the following context, answer the question.
+
+CONTEXT:
+{context_text}
+
+QUESTION: {question}
+
+Answer the question using the context provided above. If the context doesn't contain enough information, say so and provide what you know from general knowledge."""
+        
+        # Use regular ask() method with the enhanced prompt
+        return self.ask(enhanced_prompt, mode=mode, max_tokens=max_tokens)
     
     def analyze_error(self, error_msg, code=""):
         """Analyze code error and provide solution

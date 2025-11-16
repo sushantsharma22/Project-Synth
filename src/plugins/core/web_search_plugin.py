@@ -1,13 +1,17 @@
 """
 Web Search/Research Plugin - Phase 5: Advanced Features
-Smart web searches, article summarization, research assistance
+Smart web searches, article summarization, research assistance, content indexing
+
+Enhanced with RAG integration for indexing web content
 """
 
 import re
 import logging
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 from urllib.parse import quote_plus
+import requests
+from bs4 import BeautifulSoup
 
 import sys
 project_root = Path(__file__).parent.parent.parent.parent
@@ -16,6 +20,14 @@ sys.path.insert(0, str(project_root))
 from src.plugins.base_plugin import (
     BasePlugin, PluginMetadata, PluginContext, PluginSuggestion
 )
+
+# Try to import readability for clean text extraction
+try:
+    from readability import Document
+    READABILITY_AVAILABLE = True
+except ImportError:
+    READABILITY_AVAILABLE = False
+    print("⚠️  readability-lxml not installed. Run: pip install readability-lxml")
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +96,10 @@ class WebSearchPlugin(BasePlugin):
     def analyze(self, context: PluginContext) -> List[PluginSuggestion]:
         """Analyze and provide search suggestions."""
         suggestions = []
+        
+        if not context.clipboard_text:
+            return suggestions
+            
         text = context.clipboard_text.strip()
         
         if not text:
@@ -253,6 +269,100 @@ class WebSearchPlugin(BasePlugin):
         
         # Return first line if no error found
         return lines[0][:100]
+    
+    def fetch_and_index(self, url: str, rag=None) -> Optional[str]:
+        """
+        Fetch webpage content and add to RAG (new feature)
+        
+        Args:
+            url: URL to fetch
+            rag: SynthRAG instance (optional)
+            
+        Returns:
+            Extracted text content or None if failed
+        """
+        try:
+            # Fetch webpage
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            # Extract clean text
+            if READABILITY_AVAILABLE:
+                # Use readability for clean article extraction
+                doc = Document(response.text)
+                title = doc.title()
+                content = doc.summary()
+                
+                # Parse HTML to get text
+                soup = BeautifulSoup(content, 'html.parser')
+                text = soup.get_text(separator='\n', strip=True)
+            else:
+                # Fallback to basic BeautifulSoup extraction
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Remove script and style elements
+                for script in soup(["script", "style"]):
+                    script.decompose()
+                
+                # Get title
+                title = soup.title.string if soup.title else url
+                
+                # Get text
+                text = soup.get_text(separator='\n', strip=True)
+            
+            # Clean up text
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            clean_text = '\n'.join(lines)
+            
+            # Add to RAG if provided
+            if rag and clean_text:
+                metadata = {
+                    'url': url,
+                    'title': title,
+                    'content_type': 'webpage'
+                }
+                rag.add_document(clean_text, url, metadata)
+                logger.info(f"Indexed webpage: {url}")
+            
+            return clean_text
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch/index {url}: {e}")
+            return None
+    
+    def search_indexed_content(self, query: str, rag=None, top_k: int = 3) -> Optional[List]:
+        """
+        Search previously indexed web content in RAG
+        
+        Args:
+            query: Search query
+            rag: SynthRAG instance (optional)
+            top_k: Number of results
+            
+        Returns:
+            List of search results from RAG or None
+        """
+        if not rag:
+            return None
+        
+        try:
+            # Search RAG for web content
+            results = rag.search(query, top_k=top_k, min_score=0.4)
+            
+            # Filter for webpage sources only
+            web_results = [
+                r for r in results 
+                if r.get('metadata', {}).get('content_type') == 'webpage'
+            ]
+            
+            return web_results
+            
+        except Exception as e:
+            logger.error(f"Failed to search indexed content: {e}")
+            return None
 
 
 if __name__ == "__main__":
@@ -284,5 +394,16 @@ if __name__ == "__main__":
     print(f"   Suggestions: {len(suggestions)}")
     for s in suggestions:
         print(f"   - {s.title}: {s.description}")
+    
+    # Test 4: Fetch and index (if URL provided)
+    print("\n4️⃣ Test: Fetch and Index")
+    test_url = "https://example.com"
+    print(f"   Testing with URL: {test_url}")
+    content = plugin.fetch_and_index(test_url)
+    if content:
+        print(f"   ✅ Fetched {len(content)} characters")
+        print(f"   Preview: {content[:100]}...")
+    else:
+        print(f"   ⚠️  Could not fetch content (expected for example.com)")
     
     print("\n✅ Web Search Plugin test complete!\n")

@@ -5,7 +5,9 @@ Uses PyObjC to create a dropdown with text field embedded directly
 
 import sys
 from pathlib import Path
-from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem, 
+import subprocess
+import threading
+from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem,
                     NSTextField, NSButton, NSView, NSColor, NSFont,
                     NSNotificationCenter, NSUserNotification, NSUserNotificationCenter,
                     NSTextView, NSScrollView, NSPasteboard, NSApp)
@@ -20,6 +22,8 @@ from brain_client import DeltaBrain
 from src.senses.screen_capture import ScreenCapture
 from src.plugins.plugin_manager import PluginManager
 from src.plugins.base_plugin import PluginContext
+from src.rag.web_search import WebSearchRAG
+from src.rag.local_rag import SynthRAG
 
 
 class CopyableTextView(NSTextView):
@@ -29,30 +33,106 @@ class CopyableTextView(NSTextView):
         """Allow this view to become first responder"""
         return True
     
+    def becomeFirstResponder(self):
+        """Override to ensure we can become first responder"""
+        result = objc.super(CopyableTextView, self).becomeFirstResponder()
+        return result
+    
+    def performKeyEquivalent_(self, event):
+        """Handle keyboard shortcuts like Cmd+C, Cmd+V, Cmd+A"""
+        # Get the modifier flags and key
+        modifierFlags = event.modifierFlags()
+        characters = event.charactersIgnoringModifiers()
+        
+        # Check for Command key
+        if modifierFlags & (1 << 20):  # NSCommandKeyMask
+            if characters == 'c':
+                self.copy_(None)
+                return True
+            elif characters == 'v':
+                self.paste_(None)
+                return True
+            elif characters == 'x':
+                self.cut_(None)
+                return True
+            elif characters == 'a':
+                self.selectAll_(None)
+                return True
+        
+        return objc.super(CopyableTextView, self).performKeyEquivalent_(event)
+    
+    def validateUserInterfaceItem_(self, item):
+        """Validate menu items like Copy, Paste, Select All"""
+        action = item.action()
+        if action in ('copy:', 'paste:', 'selectAll:', 'cut:'):
+            return True
+        return objc.super(CopyableTextView, self).validateUserInterfaceItem_(item)
+    
     def copy_(self, sender):
-        """Explicit copy handler"""
+        """Explicit copy handler - works with Cmd+C"""
         selectedRange = self.selectedRange()
         if selectedRange.length > 0:
             selectedText = self.string()[selectedRange.location:selectedRange.location + selectedRange.length]
         else:
             selectedText = self.string()
         
-        pasteboard = NSPasteboard.generalPasteboard()
-        pasteboard.clearContents()
-        pasteboard.setString_forType_(selectedText, "public.utf8-plain-text")
+        if selectedText:
+            pasteboard = NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            pasteboard.setString_forType_(selectedText, "public.utf8-plain-text")
         return True
     
     def paste_(self, sender):
-        """Explicit paste handler"""
-        pasteboard = NSPasteboard.generalPasteboard()
-        text = pasteboard.stringForType_("public.utf8-plain-text")
-        if text and self.isEditable():
-            self.insertText_(text)
-        return True
+        """Explicit paste handler - works with Cmd+V"""
+        if not self.isEditable():
+            return False
+        
+        try:
+            pasteboard = NSPasteboard.generalPasteboard()
+            text = pasteboard.stringForType_("public.utf8-plain-text")
+            
+            if text:
+                # Get current selection
+                selectedRange = self.selectedRange()
+                
+                # Replace selected text or insert at cursor
+                if self.shouldChangeTextInRange_replacementString_(selectedRange, text):
+                    self.replaceCharactersInRange_withString_(selectedRange, text)
+                    
+                    # Move cursor to end of pasted text
+                    newLocation = selectedRange.location + len(text)
+                    self.setSelectedRange_((newLocation, 0))
+                    
+                    # Notify delegate of change
+                    self.didChangeText()
+                    return True
+        except Exception as e:
+            print(f"Paste error: {e}")
+            # Fallback to simple insert
+            try:
+                self.insertText_(text if text else "")
+            except:
+                pass
+        
+        return False
     
     def selectAll_(self, sender):
-        """Select all text"""
-        self.setSelectedRange_((0, len(self.string())))
+        """Select all text - works with Cmd+A"""
+        length = len(self.string())
+        self.setSelectedRange_((0, length))
+        return True
+    
+    def cut_(self, sender):
+        """Cut text - works with Cmd+X"""
+        if not self.isEditable():
+            return False
+        selectedRange = self.selectedRange()
+        if selectedRange.length > 0:
+            selectedText = self.string()[selectedRange.location:selectedRange.location + selectedRange.length]
+            pasteboard = NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            pasteboard.setString_forType_(selectedText, "public.utf8-plain-text")
+            self.delete_(sender)
         return True
 
 
@@ -80,6 +160,12 @@ class SynthMenuBarNative(NSObject):
         # Initialize AI components
         self.brain = DeltaBrain()
         self.screen_capture = ScreenCapture()
+        self.web_search = WebSearchRAG()  # Web search (renamed from rag)
+        self.rag = SynthRAG()  # Local vector RAG with Qdrant
+        
+        print(f"🧠 Brain: Connected")
+        print(f"🌐 Web Search: Ready") 
+        print(f"💾 Local RAG: {self.rag.get_stats()['status']}")
         
         # Initialize Plugin Manager
         print("🔌 Loading plugins...")
@@ -173,29 +259,30 @@ class SynthMenuBarNative(NSObject):
         self.scroll_view = scroll_view
         
         # Text input ABOVE buttons now! - ALSO USE CopyableTextView!
-        text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 30, 480, 30))
-        text_scroll.setBorderType_(0)
-        text_scroll.setDrawsBackground_(False)
+        text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 30, 480, 35))
+        text_scroll.setBorderType_(1)  # Border for visibility
+        text_scroll.setDrawsBackground_(True)
+        text_scroll.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.25, 0.25, 0.27, 0.80))
         text_scroll.setHasVerticalScroller_(False)
         text_scroll.setHasHorizontalScroller_(False)
         
         # USE CUSTOM CopyableTextView FOR INPUT TOO!
-        self.text_field = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 480, 30))
+        self.text_field = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 475, 35))
         self.text_field.setEditable_(True)
         self.text_field.setSelectable_(True)
         self.text_field.setRichText_(False)
-        self.text_field.setFont_(NSFont.systemFontOfSize_(15))  # Bigger font
+        self.text_field.setFont_(NSFont.systemFontOfSize_(14))
         
         # LIGHTER background for BRIGHT CURSOR visibility!
-        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.25, 0.25, 0.27, 0.60))
+        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.20, 0.20, 0.22, 1.0))
         self.text_field.setTextColor_(NSColor.whiteColor())
         
-        # BRIGHT CYAN/BLUE CURSOR - VERY VISIBLE!
-        self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(0.3, 0.8, 1.0, 1.0))
+        # BRIGHT CURSOR!
+        self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.7, 1.0, 1.0))
         
         # CRITICAL: Enable copy/paste functionality!
         self.text_field.setAllowsUndo_(True)
-        self.text_field.setUsesFindBar_(True)
+        self.text_field.setUsesFindBar_(False)
         
         # Disable auto-substitutions (they interfere with copy/paste)
         try:
@@ -206,21 +293,14 @@ class SynthMenuBarNative(NSObject):
         except:
             pass
         
-        # Rounded corners!
-        try:
-            self.text_field.setWantsLayer_(True)
-            self.text_field.layer().setCornerRadius_(10.0)
-            self.text_field.layer().setMasksToBounds_(True)
-        except:
-            pass
-        
         # Better text handling
         self.text_field.setHorizontallyResizable_(False)
-        self.text_field.setVerticallyResizable_(True)
+        self.text_field.setVerticallyResizable_(False)
+        self.text_field.setMaxSize_(NSMakeSize(475, 35))
         try:
             self.text_field.textContainer().setWidthTracksTextView_(True)
-            self.text_field.textContainer().setContainerSize_(NSMakeSize(480, 1000))
-            self.text_field.textContainer().setLineFragmentPadding_(10.0)
+            self.text_field.textContainer().setContainerSize_(NSMakeSize(470, 35))
+            self.text_field.textContainer().setLineFragmentPadding_(8.0)
         except:
             pass
         
@@ -425,56 +505,64 @@ The plugin will automatically activate when relevant to your query."""
     
     def capture_selected_text(self):
         """
-        Capture currently selected text from anywhere on macOS.
-        Preserves clipboard content before and after.
+        Capture currently selected text from the active application.
+        Uses improved AppleScript to get selected text.
         
         Returns:
-            str: Selected text, or empty string if nothing selected
+            str: Selected text from active app, or clipboard text as fallback
         """
-        import subprocess
-        
-        # Save current clipboard content
-        pasteboard = NSPasteboard.generalPasteboard()
-        saved_clipboard = pasteboard.stringForType_("public.utf8-plain-text")
-        
         try:
-            # Use AppleScript to copy selected text (Cmd+C)
-            applescript = '''
+            # Save current clipboard content first
+            pasteboard = NSPasteboard.generalPasteboard()
+            original_clipboard = pasteboard.stringForType_("public.utf8-plain-text")
+            
+            # METHOD 1: Try to get selected text using improved AppleScript
+            script = '''
             tell application "System Events"
-                keystroke "c" using {command down}
+                set frontApp to name of first application process whose frontmost is true
+                -- Don't copy if we're the active app
+                if frontApp is not "Python" and frontApp is not "Synth" then
+                    keystroke "c" using command down
+                    delay 0.15
+                end if
             end tell
+            
+            -- Get clipboard content
+            set clipboardContent to the clipboard as text
+            return clipboardContent
             '''
             
-            # Execute AppleScript
-            subprocess.run(['osascript', '-e', applescript], 
-                          capture_output=True, 
-                          timeout=1)
+            result = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
             
-            # Small delay to allow clipboard to update
-            import time
-            time.sleep(0.1)
+            if result.returncode == 0 and result.stdout.strip():
+                selected_text = result.stdout.strip()
+                # Only return if it's different from original clipboard (means new text was selected)
+                if selected_text and selected_text != original_clipboard:
+                    print(f"✅ Captured selected text: {len(selected_text)} chars")
+                    return selected_text
             
-            # Get the newly copied text
-            selected_text = pasteboard.stringForType_("public.utf8-plain-text")
+            # METHOD 2: Fallback - just read current clipboard
+            clipboard_text = pasteboard.stringForType_("public.utf8-plain-text")
+            if clipboard_text:
+                print(f"📋 Using clipboard text: {len(clipboard_text)} chars")
+                return clipboard_text
             
-            # Restore original clipboard if it was different
-            if saved_clipboard and saved_clipboard != selected_text:
-                pasteboard.clearContents()
-                pasteboard.setString_forType_(saved_clipboard, "public.utf8-plain-text")
-            
-            # Return empty string if nothing was selected (clipboard unchanged)
-            if selected_text == saved_clipboard:
-                return ""
-            
-            return selected_text if selected_text else ""
+            return ""
             
         except Exception as e:
-            # Restore clipboard on error
-            if saved_clipboard:
-                pasteboard.clearContents()
-                pasteboard.setString_forType_(saved_clipboard, "public.utf8-plain-text")
-            print(f"⚠️ Error capturing selected text: {e}")
-            return ""
+            print(f"⚠️ Error capturing text: {e}")
+            # Final fallback - just read clipboard
+            try:
+                pasteboard = NSPasteboard.generalPasteboard()
+                clipboard_text = pasteboard.stringForType_("public.utf8-plain-text")
+                return clipboard_text if clipboard_text else ""
+            except:
+                return ""
     
     def screenWithQuery_(self, sender):
         """Auto-capture screen + use query - ONE CLICK!"""
@@ -488,38 +576,85 @@ The plugin will automatically activate when relevant to your query."""
             self.analyze_screen_with_query(query)
     
     def handleQuery_(self, sender):
-        """Handle query from text field - WITH AUTO TEXT SELECTION CAPTURE!"""
+        """Handle query from text field - SMART MODE: Context-aware OR web search"""
         query = str(self.text_field.string()).strip()
         
         if not query:
             return
         
-        # Show result area and loading message
-        self.scroll_view.setHidden_(False)
-        self.safe_update_result("📋 Capturing selected text...")
-        self.expand_view_for_content(100)
+        # Clear input immediately
+        self.text_field.setString_("")
         
-        # CAPTURE SELECTED TEXT FROM ANYWHERE ON SCREEN
-        selected_text = self.capture_selected_text()
+        # Show result area
+        self.scroll_view.setHidden_(False)
+        self.expand_view_for_content(100)
         
         # Check if Screen checkbox is ON
         screen_enabled = self.screen_button.state() == 1
         
         if screen_enabled:
             # User wants screen capture WITH this query
+            self.safe_update_result("📸 Screen mode enabled...")
             self.analyze_screen_with_query(query)
-        else:
-            # Regular query - include selected text if available
-            self.text_field.setString_("")
-            
-            if selected_text:
-                # Combine query with selected text
-                combined_query = f"{query}\n\n📋 SELECTED TEXT:\n{selected_text}"
-                self.safe_update_result(f"🧠 Processing with selected text ({len(selected_text)} chars)...")
-                self.process_query_with_context(query, selected_text)
+            return
+        
+        # SMART PRIORITY: Check for highlighted/selected text FIRST
+        self.safe_update_result("📋 Checking for selected text...")
+        clipboard_text = self.capture_selected_text()
+        
+        # Show what was captured with preview
+        if clipboard_text and len(clipboard_text.strip()) > 10:
+            char_count = len(clipboard_text)
+            word_count = len(clipboard_text.split())
+            # Show first 200 chars, clean up newlines
+            preview = clipboard_text[:200].replace('\n', ' ').replace('  ', ' ').strip()
+            if len(clipboard_text) > 200:
+                preview += "..."
+            self.safe_update_result(f"📋 Captured: {char_count} chars, {word_count} words\n\n📝 Preview:\n\"{preview}\"\n\n⏳ Processing...")
+        
+        # Check if query explicitly references clipboard/highlighted text
+        query_lower = query.lower()
+        context_indicators = [
+            'highlighted', 'selected', 'this text', 'this part', 'this section',
+            'above', 'copied', 'clipboard', 'selection', 'marked', 'passage'
+        ]
+        wants_clipboard = any(indicator in query_lower for indicator in context_indicators)
+        
+        # CRITICAL: Short action queries like "explain", "summarize" should use clipboard!
+        short_action_queries = ['explain', 'summarize', 'analyze', 'paraphrase', 'simplify', 'elaborate']
+        is_short_action = query_lower.strip() in short_action_queries
+        
+        # Check if clipboard text is relevant to the query
+        has_relevant_context = False
+        if clipboard_text and len(clipboard_text.strip()) > 10:
+            if wants_clipboard or is_short_action:
+                # User explicitly asked about clipboard OR used short action word
+                has_relevant_context = True
             else:
-                # No selected text, process normally
-                self.process_query(query)
+                # Extract key terms from query (remove common words)
+                common_words = ['what', 'is', 'the', 'explain', 'define', 'how', 'why', 'does', 'can', 'tell', 'me', 'about', 'and', 'or']
+                query_terms = [word for word in query_lower.split() if word not in common_words and len(word) > 2]
+                
+                # Check if ANY query term appears in clipboard
+                clipboard_lower = clipboard_text.lower()
+                for term in query_terms:
+                    if term in clipboard_lower:
+                        has_relevant_context = True
+                        break
+        
+        # DECISION: Use context OR web search
+        if has_relevant_context:
+            # User has RELEVANT text selected - use it!
+            self.safe_update_result(f"✅ Using your highlighted text ({char_count} chars)\n\n🧠 Analyzing with AI...")
+            self.process_query_with_context(query, clipboard_text)
+        elif self.needs_web_search(query):
+            # No relevant context, query needs web search
+            self.safe_update_result("🔍 No highlighted text found. Searching web...")
+            self.process_query(query)
+        else:
+            # Generic query without context
+            self.safe_update_result("🧠 Processing your query with AI...")
+            self.process_query(query)
     
     def expand_view_for_content(self, content_height):
         """Expand the view to fit content"""
@@ -534,8 +669,49 @@ The plugin will automatically activate when relevant to your query."""
         # Resize container
         self.input_view.setFrame_(NSMakeRect(0, 0, 500, new_total_height))
     
+    def needs_web_search(self, query: str) -> bool:
+        """
+        Determine if a query needs web search (RAG)
+        
+        Returns True for:
+        - Current events, news, elections
+        - "What is", "Who is", "When did", "Explain"
+        - Recent/latest information
+        - Technical concepts, acronyms, standards
+        """
+        query_lower = query.lower()
+        
+        # Keywords that ALWAYS trigger web search
+        search_keywords = [
+            'latest', 'recent', 'current', 'news', 'today', 'yesterday',
+            'election', 'politics', 'score', 'weather', 'stock',
+            'what is', 'who is', 'when did', 'where is', 'how to',
+            'tell me about', 'information about', 'details about',
+            'research', 'find', 'search', 'explain', 'define',
+            'what are', 'what does', 'why is', 'why did'
+        ]
+        
+        # Check if any keyword is in the query
+        for keyword in search_keywords:
+            if keyword in query_lower:
+                return True
+        
+        # Check for technical indicators: acronyms, standards, year+technical term
+        # e.g., "ML-KEM", "FIPS 203", "2024 NIST"
+        words = query.split()
+        for word in words:
+            # Detect acronyms (2-10 caps letters with optional hyphens/numbers)
+            if len(word) >= 2 and any(c.isupper() for c in word) and any(c in word for c in ['-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']):
+                return True
+        
+        # Long specific questions likely need research
+        if len(query.split()) >= 8 and '?' in query:
+            return True
+            
+        return False
+    
     def process_query(self, query):
-        """Process query - TRY PLUGINS FIRST, then Brain fallback"""
+        """Process query from Ask button - ALWAYS checks clipboard for highlighted text"""
         import threading
         
         # Show loading immediately
@@ -543,7 +719,77 @@ The plugin will automatically activate when relevant to your query."""
         
         def process_in_background():
             try:
-                # STEP 1: Try plugins first - use query as clipboard_text
+                # ASK BUTTON = Check clipboard FIRST (for Cmd+C highlighted text)
+                pasteboard = NSPasteboard.generalPasteboard()
+                clipboard_text = pasteboard.stringForType_("public.utf8-plain-text") or ""
+                
+                # If clipboard has substantial text (> 50 chars) and query is explanatory
+                is_explanatory_query = any(word in query.lower() for word in 
+                    ['explain', 'what', 'summarize', 'tell me about', 'describe', 'how does', 'define', 'tell'])
+                
+                if len(clipboard_text) > 50 and is_explanatory_query:
+                    # User did Cmd+C and wants explanation - use clipboard
+                    self.safe_update_result(f"📋 Using clipboard ({len(clipboard_text)} chars)\n🧠 Analyzing...")
+                    
+                    enhanced_query = f"""QUESTION: {query}
+
+HIGHLIGHTED TEXT:
+{clipboard_text[:4000]}
+
+CRITICAL INSTRUCTIONS:
+- Answer ONLY based on the highlighted text above
+- Do NOT add external knowledge or explanations beyond what's written
+- Keep your answer focused and concise (200-300 words max)
+- If the text doesn't contain the answer, say so
+- Answer in ENGLISH ONLY
+
+ANSWER:"""
+                    
+                    result = self.brain.ask(enhanced_query, mode="balanced", max_tokens=400)
+                    self.safe_update_result(result)
+                    return
+                
+                # No clipboard content or not explanatory - continue with normal flow
+                # Check if query needs web search (RAG)
+                if self.needs_web_search(query):
+                    self.safe_update_result("🔍 Searching web for latest information...")
+                    
+                    # Perform web search
+                    search_results = self.web_search.search(query, include_news=True)
+                    
+                    if search_results['sources_count'] > 0:
+                        from datetime import datetime
+                        current_date = datetime.now().strftime("%B %d, %Y")
+                        
+                        # Create enhanced prompt with web context
+                        enhanced_query = f"""DATE: {current_date}
+
+QUESTION: {query}
+
+WEB SOURCES:
+{search_results['context']}
+
+Answer the question using the web sources above. Be accurate and cite key facts.
+
+ANSWER:"""
+
+                        self.safe_update_result(f"✅ Found {search_results['sources_count']} sources. Analyzing...\n\n🧠 Generating answer...")
+                        
+                        # Send to Brain with web context
+                        result = self.brain.ask(enhanced_query, mode="balanced")
+                        
+                        # Add sources at the end
+                        sources_text = "\n\n📚 Sources:\n"
+                        for i, res in enumerate(search_results['results'][:5], 1):
+                            sources_text += f"{i}. {res.title}\n   {res.source}\n"
+                        
+                        self.safe_update_result(result + sources_text)
+                        return
+                    else:
+                        # No web results, fall through to plugins/Brain
+                        self.safe_update_result("⚠️ No web results found. Using AI knowledge...\n\n")
+                
+                # STEP 2: Try plugins - use query as clipboard_text
                 from src.plugins.base_plugin import PluginContext
                 
                 context = PluginContext(
@@ -581,7 +827,7 @@ The plugin will automatically activate when relevant to your query."""
                         self.safe_update_result(f"✅ {top.title}\n\n{result}")
                 
                 else:
-                    # STEP 2: No plugin matched, use Brain
+                    # STEP 3: No plugin matched, use Brain directly
                     result = self.brain.ask(query, mode="balanced")
                     self.safe_update_result(result)
                 
@@ -597,38 +843,177 @@ The plugin will automatically activate when relevant to your query."""
     
     def process_query_with_context(self, query, selected_text):
         """
-        Process query with selected text context.
-        Combines user question with selected text for better AI responses.
+        Process query with clipboard text context.
+        NOW WITH RAG: Extracts key terms from BOTH query AND clipboard, searches web!
         
         Args:
             query: User's question/request
-            selected_text: Text that was selected on screen
+            selected_text: Text from clipboard
         """
         import threading
-        
-        # Show loading immediately
-        self.result_view.setString_("🧠 Analyzing with selected text...")
+        import re
         
         def process_in_background():
             try:
-                # Create enhanced prompt with selected text
-                enhanced_prompt = f"""USER QUESTION: {query}
+                # STEP 1: Extract terms to search from BOTH query AND clipboard
+                query_lower = query.lower()
+                
+                # A. Extract specific terms from query (e.g., "what is FIPS 203")
+                query_terms_to_search = []
+                
+                # Pattern: "what is X", "explain X", "define X"
+                what_is_match = re.search(r'what\s+is\s+([A-Z0-9\s\-]+?)(?:\?|$|in)', query, re.IGNORECASE)
+                if what_is_match:
+                    query_terms_to_search.append(what_is_match.group(1).strip())
+                
+                explain_match = re.search(r'explain\s+([A-Z0-9\s\-]+?)(?:\?|$|in)', query, re.IGNORECASE)
+                if explain_match:
+                    query_terms_to_search.append(explain_match.group(1).strip())
+                
+                # B. Extract technical terms from clipboard
+                # Pattern 1: All-caps acronyms (BAKE, NIST, ML-KEM)
+                acronym_pattern = r'\b[A-Z][A-Z0-9\-]{2,15}\b'
+                clipboard_acronyms = list(set(re.findall(acronym_pattern, selected_text)))
+                
+                # Pattern 2: CAPS + numbers (FIPS 203, ISO 27001)
+                caps_num_pattern = r'\b[A-Z]+\s+\d{2,5}\b'
+                clipboard_standards = list(set(re.findall(caps_num_pattern, selected_text)))
+                
+                # Combine all technical terms
+                all_technical_terms = query_terms_to_search + clipboard_acronyms + clipboard_standards
+                all_technical_terms = list(set([t.strip() for t in all_technical_terms if len(t.strip()) > 1]))
+                
+                # DON'T add clipboard to RAG - causes pollution
+                # We'll use clipboard directly in context instead
+                
+                # STEP 2: Query RAG for relevant context (from previous knowledge only)
+                self.safe_update_result("💾 Searching local knowledge base...")
+                rag_result = self.rag.query(query, top_k=3, min_score=0.5)
+                
+                # Add web search results to RAG too
+                self.safe_update_result("🌐 Searching web for additional context...")
+                
+                # STEP 3: ALWAYS search web if we have technical terms OR explanatory query
+                needs_web = (all_technical_terms and len(all_technical_terms) > 0) or \
+                           any(word in query_lower for word in ['explain', 'what', 'define', 'meaning', 'describe'])
+                
+                if needs_web:
+                    # FORCE web search for better context
+                    terms_preview = ', '.join(all_technical_terms[:5]) if all_technical_terms else query
+                    self.safe_update_result(f"🔍 Key terms: {terms_preview}\n🌐 Searching web for latest info...")
+                    
+                    # Build search terms: prioritize extracted terms
+                    all_search_results = []
+                    terms_to_search = []
+                    
+                    # Add query terms first
+                    if query_terms_to_search:
+                        terms_to_search.extend(query_terms_to_search[:2])
+                    
+                    # Add clipboard acronyms/standards
+                    if clipboard_acronyms:
+                        terms_to_search.extend(clipboard_acronyms[:2])
+                    if clipboard_standards:
+                        terms_to_search.extend(clipboard_standards[:2])
+                    
+                    # If still empty, use technical terms
+                    if not terms_to_search and all_technical_terms:
+                        terms_to_search = all_technical_terms[:3]
+                    
+                    # If STILL empty, use query itself
+                    if not terms_to_search:
+                        terms_to_search = [query]
+                    
+                    # Search for each term
+                    for term in terms_to_search[:4]:  # Limit to 4 searches
+                        try:
+                            # Search with context keywords
+                            search_query = f"{term} cryptography" if any(word in selected_text.lower() for word in ['crypto', 'security', 'key']) else term
+                            search_results = self.web_search.search(search_query, include_news=False)
+                            
+                            if search_results['sources_count'] > 0:
+                                all_search_results.extend(search_results['results'][:2])
+                                self.safe_update_result(f"🔍 Searching: {term}\n✓ Found {search_results['sources_count']} sources...")
+                        except Exception as e:
+                            print(f"Search failed for {term}: {e}")
+                    
+                    # Build comprehensive context
+                    from datetime import datetime
+                    current_date = datetime.now().strftime("%B %d, %Y")
+                    
+                    # Add web results to RAG for future reference
+                    if all_search_results:
+                        self.rag.add_web_results(all_search_results, query)
+                    
+                    web_context = ""
+                    if all_search_results:
+                        web_context = "\n\nWEB SEARCH RESULTS:\n"
+                        for i, res in enumerate(all_search_results[:6], 1):
+                            web_context += f"{i}. {res.title}\n   {res.snippet[:200]}...\n   Source: {res.source}\n\n"
+                    
+                    # Build RAG context
+                    rag_context = ""
+                    if rag_result['has_context']:
+                        rag_context = "\n\nKNOWLEDGE BASE:\n"
+                        for i, source in enumerate(rag_result['sources'], 1):
+                            rag_context += f"[{i}] {source['text'][:200]}... (score: {source['score']:.2f})\n\n"
+                    
+                    # Create COMPREHENSIVE prompt with RAG + Web + Clipboard
+                    enhanced_prompt = f"""CURRENT DATE: {current_date}
 
-SELECTED TEXT CONTEXT:
-{selected_text[:5000]}
+QUESTION: {query}
 
-Please answer the user's question based on the selected text above. If the question relates to the selected text, use it as context. If not, answer normally but acknowledge what text was selected."""
+CONTEXT FROM USER'S SELECTED TEXT:
+{selected_text[:2500]}
+{rag_context}
+{web_context}
 
-                # Send to Brain with enhanced context
-                result = self.brain.ask(enhanced_prompt, mode="balanced")
-                self.safe_update_result(result)
+INSTRUCTIONS:
+- Answer the user's question clearly and directly in ENGLISH ONLY
+- Use information from ALL sources: selected text, knowledge base, and web search results
+- If defining technical terms ({', '.join(all_technical_terms[:3])}), provide clear explanations
+- Be comprehensive and complete - aim for 300-500 words
+- If using web sources, briefly cite them
+- Focus on accuracy and relevance
+- DO NOT mix languages - answer entirely in English
+
+ANSWER:"""
+
+                    sources_found = len(all_search_results) + len(rag_result['sources'])
+                    self.safe_update_result(f"✅ Found {sources_found} total sources (RAG: {len(rag_result['sources'])}, Web: {len(all_search_results)})\n🧠 Generating comprehensive answer...")
+                    
+                    # Increase max_tokens for comprehensive answer
+                    result = self.brain.ask(enhanced_prompt, mode="balanced", max_tokens=800)
+                    
+                    # Add sources
+                    if all_search_results:
+                        sources_text = "\n\n📚 Sources:\n"
+                        for i, res in enumerate(all_search_results[:6], 1):
+                            sources_text += f"{i}. {res.title} ({res.source})\n"
+                        result += sources_text
+                    
+                    self.safe_update_result(result)
+                else:
+                    # Simple context query - no web search needed
+                    enhanced_prompt = f"""QUESTION: {query}
+
+SELECTED TEXT:
+{selected_text[:4000]}
+
+Please answer the question about the selected text above. Be clear, detailed, and accurate. Answer in ENGLISH ONLY.
+
+ANSWER:"""
+
+                    self.safe_update_result("🧠 Analyzing with AI...")
+                    result = self.brain.ask(enhanced_prompt, mode="balanced", max_tokens=600)
+                    self.safe_update_result(result)
                 
             except Exception as e:
                 import traceback
                 error_msg = f"❌ Error: {str(e)}\n\n{traceback.format_exc()}"
                 self.safe_update_result(error_msg)
         
-        # Run in background thread so Mac doesn't freeze
+        # Run in background thread
         thread = threading.Thread(target=process_in_background)
         thread.daemon = True
         thread.start()
@@ -667,13 +1052,55 @@ Please answer the user's question based on the selected text above. If the quest
         self.analyze_screen_with_query("what's on the screen")
     
     def analyze_screen_with_query(self, query):
-        """Analyze screen content and show in dropdown - RUNS IN BACKGROUND"""
+        """Analyze screen content - ALWAYS captures entire screen, no clipboard"""
         import time
         import threading
         
         def capture_and_analyze():
             try:
-                # Show countdown - shorter messages to reduce lag
+                # Screen button = capture ENTIRE screen, NOT clipboard
+                # Ask button = use clipboard
+                
+                # Check if query needs web search BEFORE screen capture
+                needs_search = self.needs_web_search(query)
+                
+                if needs_search:
+                    # User wants web search, not screen analysis
+                    self.safe_update_result("🔍 This looks like a research question. Searching web instead of screen...")
+                    time.sleep(1)
+                    
+                    # Perform web search
+                    search_results = self.web_search.search(query, include_news=True)
+                    
+                    if search_results['sources_count'] > 0:
+                        from datetime import datetime
+                        current_date = datetime.now().strftime("%B %d, %Y")
+                        
+                        # Create enhanced prompt with web context
+                        enhanced_query = f"""CURRENT DATE: {current_date}
+
+USER QUESTION: {query}
+
+{search_results['context']}
+
+IMPORTANT: Provide a comprehensive answer based ONLY on the web search results above. Be specific, accurate, and cite key facts."""
+
+                        self.safe_update_result(f"✅ Found {search_results['sources_count']} sources. Analyzing...\n\n🧠 Generating answer...")
+                        
+                        # Send to Brain with web context
+                        result = self.brain.ask(enhanced_query, mode="balanced")
+                        
+                        # Add sources at the end
+                        sources_text = "\n\n📚 Sources:\n"
+                        for i, res in enumerate(search_results['results'][:5], 1):
+                            sources_text += f"{i}. {res.title} ({res.source})\n"
+                        
+                        self.safe_update_result(result + sources_text)
+                        return
+                    else:
+                        self.safe_update_result("⚠️ No web results. Analyzing screen instead...\n\n")
+                
+                # Continue with screen analysis
                 for i in range(2, 0, -1):
                     self.safe_update_result(f"📸 Capturing in {i}s...")
                     time.sleep(1)
@@ -690,27 +1117,23 @@ Please answer the user's question based on the selected text above. If the quest
                         if extracted_text and len(extracted_text.strip()) > 10:
                             self.safe_update_result(f"🧠 Analyzing ({len(extracted_text.split())} words)...")
                             
-                            # GENERAL-PURPOSE AI PROMPT - Works for ANY query
+                            # SCREEN ANALYSIS PROMPT
                             full_query = f"""USER REQUEST: "{query}"
 
 SCREEN CONTENT:
 {extracted_text[:6000]}
 
 Instructions:
-1. Read the screen content carefully
-2. Understand what the user wants to do based on their request
-3. If drafting email/reply: Use EXACT names from screen, write from user's perspective
-4. If asking questions: Answer based on BOTH screen content AND your knowledge
-5. If analyzing: Provide specific insights from what you see
-6. For current/recent events: Use your knowledge up to 2024
-7. Be natural, helpful, and context-aware
+1. The user wants help with what's VISIBLE on their screen
+2. If they ask to "explain" or "summarize": Focus on the screen content
+3. If they ask to "draft reply": Use names/context from screen
+4. Answer their request using the screen content as primary source
+5. Keep it natural and helpful
+6. Answer in ENGLISH ONLY - no other languages
 
-Respond directly to their request. No templates or placeholders!"""
+Respond directly to their request:"""
 
-                            # Use BALANCED model for better understanding
-                            result = self.brain.ask(full_query, mode="balanced")
-                            
-                            # Show result
+                            result = self.brain.ask(full_query, mode="balanced", max_tokens=800)
                             self.safe_update_result(result)
                             
                         else:

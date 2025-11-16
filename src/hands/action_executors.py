@@ -38,11 +38,11 @@ class ActionExecutor(ABC):
         self.action_type = self.__class__.__name__.replace('Executor', '').lower()
     
     @abstractmethod
-    def execute(self, **kwargs) -> ActionResult:
+    def execute(self, *args: Any, **kwargs: Any) -> ActionResult:
         """Execute the action with given parameters."""
         pass
     
-    def can_execute(self, **kwargs) -> tuple[bool, str]:
+    def can_execute(self, *args: Any, **kwargs: Any) -> tuple[bool, str]:
         """
         Check if action can be executed safely.
         Returns (can_execute, reason_if_not)
