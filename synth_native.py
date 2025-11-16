@@ -423,6 +423,59 @@ The plugin will automatically activate when relevant to your query."""
         """Reset copy button text"""
         self.copy_button.setTitle_("Copy")
     
+    def capture_selected_text(self):
+        """
+        Capture currently selected text from anywhere on macOS.
+        Preserves clipboard content before and after.
+        
+        Returns:
+            str: Selected text, or empty string if nothing selected
+        """
+        import subprocess
+        
+        # Save current clipboard content
+        pasteboard = NSPasteboard.generalPasteboard()
+        saved_clipboard = pasteboard.stringForType_("public.utf8-plain-text")
+        
+        try:
+            # Use AppleScript to copy selected text (Cmd+C)
+            applescript = '''
+            tell application "System Events"
+                keystroke "c" using {command down}
+            end tell
+            '''
+            
+            # Execute AppleScript
+            subprocess.run(['osascript', '-e', applescript], 
+                          capture_output=True, 
+                          timeout=1)
+            
+            # Small delay to allow clipboard to update
+            import time
+            time.sleep(0.1)
+            
+            # Get the newly copied text
+            selected_text = pasteboard.stringForType_("public.utf8-plain-text")
+            
+            # Restore original clipboard if it was different
+            if saved_clipboard and saved_clipboard != selected_text:
+                pasteboard.clearContents()
+                pasteboard.setString_forType_(saved_clipboard, "public.utf8-plain-text")
+            
+            # Return empty string if nothing was selected (clipboard unchanged)
+            if selected_text == saved_clipboard:
+                return ""
+            
+            return selected_text if selected_text else ""
+            
+        except Exception as e:
+            # Restore clipboard on error
+            if saved_clipboard:
+                pasteboard.clearContents()
+                pasteboard.setString_forType_(saved_clipboard, "public.utf8-plain-text")
+            print(f"⚠️ Error capturing selected text: {e}")
+            return ""
+    
     def screenWithQuery_(self, sender):
         """Auto-capture screen + use query - ONE CLICK!"""
         query = str(self.text_field.string()).strip()
@@ -435,7 +488,7 @@ The plugin will automatically activate when relevant to your query."""
             self.analyze_screen_with_query(query)
     
     def handleQuery_(self, sender):
-        """Handle query from text field - CHECK SCREEN CHECKBOX!"""
+        """Handle query from text field - WITH AUTO TEXT SELECTION CAPTURE!"""
         query = str(self.text_field.string()).strip()
         
         if not query:
@@ -443,8 +496,11 @@ The plugin will automatically activate when relevant to your query."""
         
         # Show result area and loading message
         self.scroll_view.setHidden_(False)
-        self.safe_update_result("🧠 Thinking...")
+        self.safe_update_result("📋 Capturing selected text...")
         self.expand_view_for_content(100)
+        
+        # CAPTURE SELECTED TEXT FROM ANYWHERE ON SCREEN
+        selected_text = self.capture_selected_text()
         
         # Check if Screen checkbox is ON
         screen_enabled = self.screen_button.state() == 1
@@ -453,9 +509,17 @@ The plugin will automatically activate when relevant to your query."""
             # User wants screen capture WITH this query
             self.analyze_screen_with_query(query)
         else:
-            # Regular query without screen
+            # Regular query - include selected text if available
             self.text_field.setString_("")
-            self.process_query(query)
+            
+            if selected_text:
+                # Combine query with selected text
+                combined_query = f"{query}\n\n📋 SELECTED TEXT:\n{selected_text}"
+                self.safe_update_result(f"🧠 Processing with selected text ({len(selected_text)} chars)...")
+                self.process_query_with_context(query, selected_text)
+            else:
+                # No selected text, process normally
+                self.process_query(query)
     
     def expand_view_for_content(self, content_height):
         """Expand the view to fit content"""
@@ -520,6 +584,44 @@ The plugin will automatically activate when relevant to your query."""
                     # STEP 2: No plugin matched, use Brain
                     result = self.brain.ask(query, mode="balanced")
                     self.safe_update_result(result)
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"❌ Error: {str(e)}\n\n{traceback.format_exc()}"
+                self.safe_update_result(error_msg)
+        
+        # Run in background thread so Mac doesn't freeze
+        thread = threading.Thread(target=process_in_background)
+        thread.daemon = True
+        thread.start()
+    
+    def process_query_with_context(self, query, selected_text):
+        """
+        Process query with selected text context.
+        Combines user question with selected text for better AI responses.
+        
+        Args:
+            query: User's question/request
+            selected_text: Text that was selected on screen
+        """
+        import threading
+        
+        # Show loading immediately
+        self.result_view.setString_("🧠 Analyzing with selected text...")
+        
+        def process_in_background():
+            try:
+                # Create enhanced prompt with selected text
+                enhanced_prompt = f"""USER QUESTION: {query}
+
+SELECTED TEXT CONTEXT:
+{selected_text[:5000]}
+
+Please answer the user's question based on the selected text above. If the question relates to the selected text, use it as context. If not, answer normally but acknowledge what text was selected."""
+
+                # Send to Brain with enhanced context
+                result = self.brain.ask(enhanced_prompt, mode="balanced")
+                self.safe_update_result(result)
                 
             except Exception as e:
                 import traceback
