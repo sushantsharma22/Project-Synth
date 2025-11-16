@@ -8,6 +8,16 @@ Version: 1.0
 """
 import requests
 import json
+import re
+import sys
+from pathlib import Path
+
+# Add project paths for agent imports
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+from src.tools.web_tools import RobustSearch, WikiTool, WebReader
+from src.brain.skills import Skills
 
 class DeltaBrain:
     """Client for Delta HPC Brain system
@@ -208,6 +218,126 @@ Provide:
             except:
                 results[mode] = "❌ Not reachable"
         return results
+    
+    def execute_agentic_task(self, user_query, selected_text=None):
+        """
+        Execute an agentic task with routing, tool execution, and synthesis.
+        This is the CORE AGENT LOGIC.
+        
+        Args:
+            user_query: User's question or request
+            selected_text: Optional text user has highlighted/selected
+            
+        Returns:
+            Final synthesized answer
+        """
+        print(f"\n{'='*60}")
+        print(f"🤖 AGENT EXECUTION: {user_query}")
+        print(f"{'='*60}\n")
+        
+        # STEP 1: ROUTE - Decide which tool to use
+        print("🎯 STEP 1: Routing to appropriate tool...")
+        router_prompt = Skills.get_router_prompt(user_query, selected_text)
+        
+        # Use fast model for routing decision
+        routing_response = self.ask(router_prompt, mode="fast", max_tokens=50)
+        print(f"Raw routing response: {routing_response}")
+        
+        # Extract tool choice from response
+        tool_match = re.search(r'\[(WEB_SEARCH|WIKIPEDIA|SUMMARIZE|PARAPHRASE|GENERAL_QA)\]', routing_response)
+        
+        if tool_match:
+            tool_choice = tool_match.group(1)
+        else:
+            # Fallback - look for keywords in response
+            if 'WEB_SEARCH' in routing_response.upper():
+                tool_choice = 'WEB_SEARCH'
+            elif 'WIKIPEDIA' in routing_response.upper():
+                tool_choice = 'WIKIPEDIA'
+            elif 'SUMMARIZE' in routing_response.upper():
+                tool_choice = 'SUMMARIZE'
+            elif 'PARAPHRASE' in routing_response.upper():
+                tool_choice = 'PARAPHRASE'
+            else:
+                tool_choice = 'GENERAL_QA'
+        
+        print(f"✅ Tool selected: [{tool_choice}]\n")
+        
+        # STEP 2: EXECUTE - Run the selected tool
+        print(f"⚙️ STEP 2: Executing [{tool_choice}]...")
+        context = ""
+        
+        if tool_choice == 'WEB_SEARCH':
+            # Web search workflow
+            print("🔍 Searching web...")
+            searcher = RobustSearch()
+            reader = WebReader()
+            
+            # Get top URLs from search
+            urls = searcher.get_top_urls(user_query, num_urls=2)
+            
+            if urls:
+                print(f"📄 Found {len(urls)} URLs, reading content...")
+                # Read content from URLs
+                context = reader.read_multiple_urls(urls, max_chars_per_url=4000)
+            else:
+                # Fallback to search results if can't get URLs
+                context = searcher.search(user_query, max_results=5)
+        
+        elif tool_choice == 'WIKIPEDIA':
+            # Wikipedia lookup
+            wiki = WikiTool()
+            context = wiki.get_summary(user_query, sentences=8)
+        
+        elif tool_choice == 'SUMMARIZE':
+            # Summarize selected text
+            if selected_text:
+                summary_prompt = Skills.summarize(selected_text)
+                return self.ask(summary_prompt, mode="balanced", max_tokens=400)
+            else:
+                return "❌ Cannot summarize - no text selected. Please highlight text first."
+        
+        elif tool_choice == 'PARAPHRASE':
+            # Paraphrase selected text
+            if selected_text:
+                paraphrase_prompt = Skills.paraphrase(selected_text)
+                return self.ask(paraphrase_prompt, mode="balanced", max_tokens=600)
+            else:
+                return "❌ Cannot paraphrase - no text selected. Please highlight text first."
+        
+        elif tool_choice == 'GENERAL_QA':
+            # Simple question - no external data needed
+            return self.ask(user_query, mode="balanced")
+        
+        print(f"✅ Context gathered ({len(context)} chars)\n")
+        
+        # STEP 3: SYNTHESIZE - Generate final answer using smart model
+        print("🧠 STEP 3: Synthesizing final answer with smart model...")
+        
+        synthesis_prompt = f"""You are a helpful AI assistant. Answer the user's question using the provided context.
+
+USER QUESTION:
+{user_query}
+
+CONTEXT:
+{context[:12000]}
+
+INSTRUCTIONS:
+- Answer the question directly and clearly
+- Use information from the context provided
+- If the context doesn't contain the answer, say so
+- Keep your answer focused and relevant
+- Answer in ENGLISH ONLY
+
+YOUR ANSWER:"""
+        
+        final_answer = self.ask(synthesis_prompt, mode="smart", max_tokens=800)
+        
+        print(f"\n{'='*60}")
+        print("✅ AGENT EXECUTION COMPLETE")
+        print(f"{'='*60}\n")
+        
+        return final_answer
 
 if __name__ == "__main__":
     print("🧠 Delta Brain Client")

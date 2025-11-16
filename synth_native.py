@@ -136,17 +136,6 @@ class CopyableTextView(NSTextView):
         return True
 
 
-class TextFieldDelegate(NSObject):
-    """Delegate to handle Enter key in text field"""
-    
-    def textView_doCommandBySelector_(self, textView, selector):
-        # Handle Enter key (insertNewline:)
-        if selector == 'insertNewline:':
-            # Call parent's handleQuery method
-            if hasattr(self, 'parent'):
-                self.parent.handleQuery_(None)
-            return True
-        return False
 
 
 class SynthMenuBarNative(NSObject):
@@ -173,6 +162,11 @@ class SynthMenuBarNative(NSObject):
         self.plugin_manager.load_all_plugins()
         print(f"✅ Loaded {len(self.plugin_manager.plugins)} plugins")
         
+        # Clipboard state tracking - stores clipboard text captured by user
+        self.captured_clipboard = None  # Text user copied with Cmd+C
+        self.clipboard_timestamp = None  # When it was captured
+        self.start_clipboard_monitor()  # Monitor for Cmd+C events
+        
         # Create status bar item
         self.statusbar = NSStatusBar.systemStatusBar()
         self.statusitem = self.statusbar.statusItemWithLength_(-1)  # Variable width
@@ -194,10 +188,6 @@ class SynthMenuBarNative(NSObject):
     
     def create_input_view(self):
         """Create custom view with embedded text field and result area"""
-        
-        # Create a delegate for handling keyboard events
-        self.text_delegate = TextFieldDelegate.alloc().init()
-        self.text_delegate.parent = self
         
         # Container view - MORE COMPACT!
         self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 270))
@@ -258,57 +248,33 @@ class SynthMenuBarNative(NSObject):
         scroll_view.setDocumentView_(self.result_view)
         self.scroll_view = scroll_view
         
-        # Text input ABOVE buttons now! - ALSO USE CopyableTextView!
-        text_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 30, 480, 35))
-        text_scroll.setBorderType_(1)  # Border for visibility
-        text_scroll.setDrawsBackground_(True)
-        text_scroll.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.25, 0.25, 0.27, 0.80))
-        text_scroll.setHasVerticalScroller_(False)
-        text_scroll.setHasHorizontalScroller_(False)
+        # Text input field - NEW PILL-SHAPED SEARCH BAR (fixes copy/paste)
+        self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(10, 30, 480, 30))
+        self.text_field.setWantsLayer_(True)
+        self.text_field.setFocusRingType_(1)  # Use blue focus ring
         
-        # USE CUSTOM CopyableTextView FOR INPUT TOO!
-        self.text_field = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 475, 35))
+        # CRITICAL: Enable editing and selection for copy/paste
         self.text_field.setEditable_(True)
         self.text_field.setSelectable_(True)
-        self.text_field.setRichText_(False)
-        self.text_field.setFont_(NSFont.systemFontOfSize_(14))
         
-        # LIGHTER background for BRIGHT CURSOR visibility!
-        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.20, 0.20, 0.22, 1.0))
+        # Style to look modern and pill-shaped
+        self.text_field.setBezeled_(False)
+        self.text_field.setDrawsBackground_(True)
+        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.16, 0.18, 0.8))
         self.text_field.setTextColor_(NSColor.whiteColor())
+        self.text_field.setFont_(NSFont.systemFontOfSize_(15))
+        self.text_field.setPlaceholderString_("Search or Ask Synth...")
         
-        # BRIGHT CURSOR!
-        self.text_field.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.7, 1.0, 1.0))
+        # Rounded "pill" shape
+        self.text_field.layer().setCornerRadius_(15.0)
         
-        # CRITICAL: Enable copy/paste functionality!
-        self.text_field.setAllowsUndo_(True)
-        self.text_field.setUsesFindBar_(False)
+        # Blue border
+        self.text_field.layer().setBorderWidth_(2.0)
+        self.text_field.layer().setBorderColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.4, 0.8, 0.7).CGColor())
         
-        # Disable auto-substitutions (they interfere with copy/paste)
-        try:
-            self.text_field.setAutomaticTextReplacementEnabled_(False)
-            self.text_field.setAutomaticQuoteSubstitutionEnabled_(False)
-            self.text_field.setAutomaticDashSubstitutionEnabled_(False)
-            self.text_field.setAutomaticSpellingCorrectionEnabled_(False)
-        except:
-            pass
-        
-        # Better text handling
-        self.text_field.setHorizontallyResizable_(False)
-        self.text_field.setVerticallyResizable_(False)
-        self.text_field.setMaxSize_(NSMakeSize(475, 35))
-        try:
-            self.text_field.textContainer().setWidthTracksTextView_(True)
-            self.text_field.textContainer().setContainerSize_(NSMakeSize(470, 35))
-            self.text_field.textContainer().setLineFragmentPadding_(8.0)
-        except:
-            pass
-        
-        text_scroll.setDocumentView_(self.text_field)
-        self.text_scroll = text_scroll
-        
-        # Set delegate to handle Enter key
-        self.text_field.setDelegate_(self.text_delegate)
+        # Set Enter key action
+        self.text_field.setTarget_(self)
+        self.text_field.setAction_("handleQuery:")
 
         # 4 BUTTONS BELOW TEXT INPUT - PROPERLY ALIGNED!
         # Ask button - BLUE accent color to stand out!
@@ -351,7 +317,7 @@ class SynthMenuBarNative(NSObject):
         
         # Add to view
         self.input_view.addSubview_(scroll_view)
-        self.input_view.addSubview_(text_scroll)
+        self.input_view.addSubview_(self.text_field)
         self.input_view.addSubview_(self.ask_button)
         self.input_view.addSubview_(self.screen_button)
         self.input_view.addSubview_(self.copy_button)
@@ -455,8 +421,13 @@ The plugin will automatically activate when relevant to your query."""
         self.scroll_view.setHidden_(True)
         
         # Clear the text field AND make it editable again
-        self.text_field.setString_("")
+        self.text_field.setStringValue_("")
         self.text_field.setEditable_(True)
+        
+        # RESET CLIPBOARD STATE - user must do Cmd+C again to capture new text
+        self.captured_clipboard = None
+        self.clipboard_timestamp = None
+        print("🔄 Clipboard state reset - press Cmd+C to capture new text")
         
         # Reset to compact height
         self.input_view.setFrame_(NSMakeRect(0, 0, 500, 60))
@@ -502,6 +473,42 @@ The plugin will automatically activate when relevant to your query."""
     def resetCopyButton_(self, sender):
         """Reset copy button text"""
         self.copy_button.setTitle_("Copy")
+    
+    def start_clipboard_monitor(self):
+        """Monitor clipboard for Cmd+C events - captures text when user copies"""
+        import time
+        
+        def monitor_clipboard():
+            pasteboard = NSPasteboard.generalPasteboard()
+            last_change_count = pasteboard.changeCount()
+            
+            while True:
+                try:
+                    current_change_count = pasteboard.changeCount()
+                    
+                    # Clipboard changed - user did Cmd+C!
+                    if current_change_count != last_change_count:
+                        last_change_count = current_change_count
+                        
+                        # Get clipboard text
+                        clipboard_text = pasteboard.stringForType_("public.utf8-plain-text")
+                        
+                        if clipboard_text and len(clipboard_text) > 20:
+                            # Capture this text - user intentionally copied it
+                            self.captured_clipboard = clipboard_text
+                            self.clipboard_timestamp = time.time()
+                            print(f"📋 Captured clipboard: {len(clipboard_text)} chars")
+                    
+                    time.sleep(0.5)  # Check every 500ms
+                except Exception as e:
+                    print(f"Clipboard monitor error: {e}")
+                    time.sleep(1)
+        
+        # Start monitor in background
+        monitor_thread = threading.Thread(target=monitor_clipboard, daemon=True)
+        monitor_thread.start()
+        print("👀 Clipboard monitor started")
+
     
     def capture_selected_text(self):
         """
@@ -576,85 +583,49 @@ The plugin will automatically activate when relevant to your query."""
             self.analyze_screen_with_query(query)
     
     def handleQuery_(self, sender):
-        """Handle query from text field - SMART MODE: Context-aware OR web search"""
-        query = str(self.text_field.string()).strip()
+        """Handle query from text field - NOW USES AGENTIC EXECUTION"""
+        query = str(self.text_field.stringValue()).strip()
         
         if not query:
             return
         
         # Clear input immediately
-        self.text_field.setString_("")
+        self.text_field.setStringValue_("")
         
         # Show result area
         self.scroll_view.setHidden_(False)
         self.expand_view_for_content(100)
         
-        # Check if Screen checkbox is ON
-        screen_enabled = self.screen_button.state() == 1
+        # Show loading immediately
+        self.result_view.setString_("🤖 Agent thinking...")
         
-        if screen_enabled:
-            # User wants screen capture WITH this query
-            self.safe_update_result("📸 Screen mode enabled...")
-            self.analyze_screen_with_query(query)
-            return
+        import threading
         
-        # SMART PRIORITY: Check for highlighted/selected text FIRST
-        self.safe_update_result("📋 Checking for selected text...")
-        clipboard_text = self.capture_selected_text()
-        
-        # Show what was captured with preview
-        if clipboard_text and len(clipboard_text.strip()) > 10:
-            char_count = len(clipboard_text)
-            word_count = len(clipboard_text.split())
-            # Show first 200 chars, clean up newlines
-            preview = clipboard_text[:200].replace('\n', ' ').replace('  ', ' ').strip()
-            if len(clipboard_text) > 200:
-                preview += "..."
-            self.safe_update_result(f"📋 Captured: {char_count} chars, {word_count} words\n\n📝 Preview:\n\"{preview}\"\n\n⏳ Processing...")
-        
-        # Check if query explicitly references clipboard/highlighted text
-        query_lower = query.lower()
-        context_indicators = [
-            'highlighted', 'selected', 'this text', 'this part', 'this section',
-            'above', 'copied', 'clipboard', 'selection', 'marked', 'passage'
-        ]
-        wants_clipboard = any(indicator in query_lower for indicator in context_indicators)
-        
-        # CRITICAL: Short action queries like "explain", "summarize" should use clipboard!
-        short_action_queries = ['explain', 'summarize', 'analyze', 'paraphrase', 'simplify', 'elaborate']
-        is_short_action = query_lower.strip() in short_action_queries
-        
-        # Check if clipboard text is relevant to the query
-        has_relevant_context = False
-        if clipboard_text and len(clipboard_text.strip()) > 10:
-            if wants_clipboard or is_short_action:
-                # User explicitly asked about clipboard OR used short action word
-                has_relevant_context = True
-            else:
-                # Extract key terms from query (remove common words)
-                common_words = ['what', 'is', 'the', 'explain', 'define', 'how', 'why', 'does', 'can', 'tell', 'me', 'about', 'and', 'or']
-                query_terms = [word for word in query_lower.split() if word not in common_words and len(word) > 2]
+        def process_in_background():
+            try:
+                # Get selected text if user captured it with Cmd+C
+                selected_text = self.captured_clipboard if (self.captured_clipboard and len(self.captured_clipboard) > 20) else None
                 
-                # Check if ANY query term appears in clipboard
-                clipboard_lower = clipboard_text.lower()
-                for term in query_terms:
-                    if term in clipboard_lower:
-                        has_relevant_context = True
-                        break
+                if selected_text:
+                    self.safe_update_result(f"📋 Using captured text ({len(selected_text)} chars)\n🤖 Agent processing...")
+                else:
+                    self.safe_update_result("🤖 Agent processing query...")
+                
+                # EXECUTE AGENTIC TASK - this is the new agent logic!
+                result = self.brain.execute_agentic_task(query, selected_text)
+                
+                # Display result
+                self.safe_update_result(result)
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"❌ Error: {str(e)}\n\n{traceback.format_exc()}"
+                self.safe_update_result(error_msg)
         
-        # DECISION: Use context OR web search
-        if has_relevant_context:
-            # User has RELEVANT text selected - use it!
-            self.safe_update_result(f"✅ Using your highlighted text ({char_count} chars)\n\n🧠 Analyzing with AI...")
-            self.process_query_with_context(query, clipboard_text)
-        elif self.needs_web_search(query):
-            # No relevant context, query needs web search
-            self.safe_update_result("🔍 No highlighted text found. Searching web...")
-            self.process_query(query)
-        else:
-            # Generic query without context
-            self.safe_update_result("🧠 Processing your query with AI...")
-            self.process_query(query)
+        # Run in background thread so Mac doesn't freeze
+        thread = threading.Thread(target=process_in_background)
+        thread.daemon = True
+        thread.start()
     
     def expand_view_for_content(self, content_height):
         """Expand the view to fit content"""
@@ -719,17 +690,12 @@ The plugin will automatically activate when relevant to your query."""
         
         def process_in_background():
             try:
-                # ASK BUTTON = Check clipboard FIRST (for Cmd+C highlighted text)
-                pasteboard = NSPasteboard.generalPasteboard()
-                clipboard_text = pasteboard.stringForType_("public.utf8-plain-text") or ""
-                
-                # If clipboard has substantial text (> 50 chars) and query is explanatory
-                is_explanatory_query = any(word in query.lower() for word in 
-                    ['explain', 'what', 'summarize', 'tell me about', 'describe', 'how does', 'define', 'tell'])
-                
-                if len(clipboard_text) > 50 and is_explanatory_query:
-                    # User did Cmd+C and wants explanation - use clipboard
-                    self.safe_update_result(f"📋 Using clipboard ({len(clipboard_text)} chars)\n🧠 Analyzing...")
+                # ASK BUTTON = Use CAPTURED clipboard (from Cmd+C monitoring)
+                # Check if user has captured clipboard text (by pressing Cmd+C)
+                if self.captured_clipboard and len(self.captured_clipboard) > 20:
+                    # User did Cmd+C and we have captured text - use it!
+                    clipboard_text = self.captured_clipboard
+                    self.safe_update_result(f"📋 Using captured text ({len(clipboard_text)} chars)\n🧠 Analyzing...")
                     
                     enhanced_query = f"""QUESTION: {query}
 
@@ -749,7 +715,7 @@ ANSWER:"""
                     self.safe_update_result(result)
                     return
                 
-                # No clipboard content or not explanatory - continue with normal flow
+                # No captured clipboard - continue with normal flow (web search/plugins)
                 # Check if query needs web search (RAG)
                 if self.needs_web_search(query):
                     self.safe_update_result("🔍 Searching web for latest information...")
