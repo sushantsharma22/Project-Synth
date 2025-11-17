@@ -13,6 +13,26 @@ from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem,
                     NSTextView, NSScrollView, NSPasteboard, NSApp)
 from Foundation import NSObject, NSMakeRect, NSMakeSize
 import objc
+from typing import Any, cast
+
+# PyObjC objects are dynamically dispatched; cast them to Any for the type
+# checker so attribute access (alloc, systemStatusBar, CGColor, etc.) doesn't
+# raise static errors in editors like VS Code / Pyright.
+NSApplication: Any = NSApplication
+NSStatusBar: Any = NSStatusBar
+NSMenu: Any = NSMenu
+NSMenuItem: Any = NSMenuItem
+NSTextField: Any = NSTextField
+NSTextView: Any = NSTextView
+NSScrollView: Any = NSScrollView
+NSButton: Any = NSButton
+NSView: Any = NSView
+NSColor: Any = NSColor
+NSFont: Any = NSFont
+NSPasteboard: Any = NSPasteboard
+NSApp: Any = NSApp
+NSUserNotification: Any = NSUserNotification
+NSUserNotificationCenter: Any = NSUserNotificationCenter
 
 # Add project paths
 project_root = Path(__file__).parent
@@ -86,7 +106,7 @@ class CopyableTextView(NSTextView):
         """Explicit paste handler - works with Cmd+V"""
         if not self.isEditable():
             return False
-        
+        text = ""
         try:
             pasteboard = NSPasteboard.generalPasteboard()
             text = pasteboard.stringForType_("public.utf8-plain-text")
@@ -1127,6 +1147,11 @@ Respond directly to their request:"""
         center.deliverNotification_(notification)
 
 
+# Tell the type checker to treat SynthMenuBarNative like Any, so we don't get
+# 'alloc' missing attribute errors. This keeps runtime behavior intact.
+# (Don't assign the class to Any - use getattr on the class instead when calling dynamic Objective-C alloc/init.)
+
+
 def main():
     """Main entry point"""
     print("🚀 Starting Synth Menu Bar (Native)...")
@@ -1135,7 +1160,7 @@ def main():
     app = NSApplication.sharedApplication()
     
     # Create menu bar
-    synth = SynthMenuBarNative.alloc().init()
+    synth = getattr(SynthMenuBarNative, 'alloc')().init()
     
     # Run app
     app.run()
