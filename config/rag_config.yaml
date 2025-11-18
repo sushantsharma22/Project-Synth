@@ -1,0 +1,141 @@
+# RAG Configuration for Project Synth
+# Controls vector database behavior, chunking, and retrieval settings
+
+# Qdrant Vector Database Settings
+qdrant:
+  # Local storage path (used when Qdrant server not available)
+  local_path: "./data/qdrant"
+  
+  # Qdrant server URL (if using docker-compose persistent storage)
+  # Set to null to use local mode only
+  server_url: "http://localhost:6333"
+  
+  # Collection name for storing vectors
+  collection_name: "synth_knowledge"
+  
+  # Vector distance metric (COSINE, EUCLID, DOT)
+  distance_metric: "COSINE"
+
+# Ollama Embeddings Settings
+embeddings:
+  # Ollama host
+  host: "localhost"
+  
+  # Ollama port (11434=3B, 11435=7B, 11436=14B)
+  port: 11435
+  
+  # Model for embeddings
+  model: "qwen2.5:7b"
+  
+  # Embedding dimensions (auto-detected, but can override)
+  dimensions: 3584
+  
+  # Request timeout in seconds
+  timeout: 30
+
+# Document Chunking Settings
+chunking:
+  # Maximum chunk size in characters
+  chunk_size: 500
+  
+  # Overlap between chunks (prevents context loss)
+  chunk_overlap: 50
+  
+  # Separators for splitting (in order of preference)
+  separators:
+    - "\n\n"  # Paragraph breaks
+    - "\n"    # Line breaks
+    - ". "    # Sentences
+    - " "     # Words
+
+# Retrieval Settings (different modes)
+retrieval:
+  # Fast mode - quick responses, fewer sources
+  fast:
+    top_k: 2
+    min_score: 0.5
+  
+  # Balanced mode - good balance of speed and quality
+  balanced:
+    top_k: 3
+    min_score: 0.5
+  
+  # Smart mode - comprehensive, more sources
+  smart:
+    top_k: 5
+    min_score: 0.3
+  
+  # Default mode to use
+  default_mode: "balanced"
+
+# Query Enhancement Settings
+query_enhancement:
+  # Whether to expand queries with synonyms/related terms
+  expand_queries: false
+  
+  # Whether to use query rewriting for better results
+  rewrite_queries: false
+  
+  # Maximum query length before truncation
+  max_query_length: 500
+
+# Response Generation Settings
+response:
+  # Include source citations in responses
+  include_citations: true
+  
+  # Maximum number of sources to cite
+  max_citations: 5
+  
+  # Show similarity scores in citations
+  show_scores: true
+  
+  # Format for citations
+  citation_format: "[{index}] {source} (score: {score:.2f})"
+
+# Caching Settings
+cache:
+  # Enable caching of embeddings (saves API calls)
+  enable_embedding_cache: true
+  
+  # Cache directory
+  cache_dir: "./data/cache"
+  
+  # Cache TTL in seconds (0 = no expiration)
+  cache_ttl: 86400  # 24 hours
+
+# Indexing Settings
+indexing:
+  # Auto-index clipboard content
+  auto_index_clipboard: true
+  
+  # Minimum clipboard length to index
+  min_clipboard_length: 50
+  
+  # Auto-index web search results
+  auto_index_web_results: true
+  
+  # Maximum web results to index per query
+  max_web_results_to_index: 5
+
+# Logging Settings
+logging:
+  # Log level (DEBUG, INFO, WARNING, ERROR)
+  level: "INFO"
+  
+  # Log RAG operations
+  log_operations: true
+  
+  # Log file path
+  log_file: "./logs/rag.log"
+
+# Performance Settings
+performance:
+  # Batch size for bulk operations
+  batch_size: 10
+  
+  # Use parallel processing for embeddings
+  parallel_embeddings: false
+  
+  # Number of workers for parallel processing
+  num_workers: 2

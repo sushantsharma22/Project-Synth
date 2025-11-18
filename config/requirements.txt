@@ -1,0 +1,57 @@
+# Project Synth - Requirements
+# Updated: November 15, 2025
+
+# ===== Phase 0: Infrastructure (INSTALLED) =====
+requests>=2.32.0
+python-dotenv>=1.0.0
+feedparser>=6.0.10  # RSS feed parsing for news
+
+# ===== Phase 1: Senses - Detection System =====
+# Clipboard monitoring (macOS)
+pyperclip>=1.8.2
+pyobjc-framework-Cocoa>=10.0  # For NSPasteboard
+
+# Screen capture
+mss>=9.0.1  # Fast cross-platform screenshots
+Pillow>=10.0.0  # Image processing and compression
+pytesseract>=0.3.10  # OCR for reading captured screens
+
+# ===== Phase 3: Hands - Automation =====
+rumps>=0.4.0  # macOS menu bar app
+pyobjc-core>=10.0  # macOS automation
+pyobjc-framework-AppleScriptKit>=10.0  # AppleScript execution
+
+# ===== Phase 4: Optimization =====
+# Fast pre-filtering (to be added)
+# sqlite3 (built-in to Python)
+
+# ===== RAG System =====
+qdrant-client>=1.7.0  # Vector database
+langchain>=0.3.0  # LangChain orchestration framework
+langgraph>=0.2.0  # LangGraph for agent workflows
+langchain-google-genai>=2.0.0  # Google Gemini integration
+langchain-community>=0.3.0  # Community integrations
+langchain-core>=0.1.0  # Core LangChain components
+tavily-python>=0.5.0  # Tavily search API
+
+# Web scraping and content extraction
+beautifulsoup4>=4.12.0  # HTML parsing
+lxml>=4.9.0  # XML/HTML processing
+readability-lxml>=0.8.1  # Clean article extraction
+
+# Configuration
+pyyaml>=6.0.1  # YAML config file support
+
+# ===== Development =====
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.0.0
+flake8>=6.0.0
+
+# ===== Agent Toolkit =====
+duckduckgo-search>=4.0.0  # Web search for finding links
+wikipedia>=1.4.0  # Wikipedia facts and information
+playwright>=1.40.0  # Browser automation for reading modern websites
+
+# ===== Optional =====
+# py2app>=0.28.0  # Phase 6: Packaging for macOS
