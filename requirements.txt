@@ -1,53 +1,43 @@
-# Project Synth - Requirements
+# requirements for Project-Synth (copied from config/requirements.txt)
 # Updated: November 15, 2025
 
-# ===== Phase 0: Infrastructure (INSTALLED) =====
 requests>=2.32.0
 python-dotenv>=1.0.0
-feedparser>=6.0.10  # RSS feed parsing for news
+feedparser>=6.0.10
 
-# ===== Phase 1: Senses - Detection System =====
-# Clipboard monitoring (macOS)
 pyperclip>=1.8.2
-pyobjc-framework-Cocoa>=10.0  # For NSPasteboard
+pyobjc-framework-Cocoa>=10.0
 
-# Screen capture
-mss>=9.0.1  # Fast cross-platform screenshots
-Pillow>=10.0.0  # Image processing and compression
+mss>=9.0.1
+Pillow>=10.0.0
+pytesseract>=0.3.10
 
-# ===== Phase 3: Hands - Automation =====
-rumps>=0.4.0  # macOS menu bar app
-pyobjc-core>=10.0  # macOS automation
-pyobjc-framework-AppleScriptKit>=10.0  # AppleScript execution
+rumps>=0.4.0
+pyobjc-core>=10.0
+pyobjc-framework-AppleScriptKit>=10.0
 
-# ===== Phase 4: Optimization =====
-# Fast pre-filtering (to be added)
-# sqlite3 (built-in to Python)
+qdrant-client>=1.7.0
+langchain>=0.3.0
+langgraph>=0.2.0
+langchain-google-genai>=2.0.0
+langchain-community>=0.3.0
+langchain-core>=0.1.0
+tavily-python>=0.5.0
 
-# ===== RAG System =====
-qdrant-client>=1.7.0  # Vector database
-langchain>=0.1.0  # LangChain orchestration framework
-langchain-community>=0.0.20  # Community integrations
-langchain-core>=0.1.0  # Core LangChain components
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+readability-lxml>=0.8.1
 
-# Web scraping and content extraction
-beautifulsoup4>=4.12.0  # HTML parsing
-lxml>=4.9.0  # XML/HTML processing
-readability-lxml>=0.8.1  # Clean article extraction
+pyyaml>=6.0.1
 
-# Configuration
-pyyaml>=6.0.1  # YAML config file support
-
-# ===== Development =====
 pytest>=7.4.0
 pytest-cov>=4.1.0
 black>=23.0.0
 flake8>=6.0.0
 
-# ===== Agent Toolkit =====
-duckduckgo-search>=4.0.0  # Web search for finding links
-wikipedia>=1.4.0  # Wikipedia facts and information
-playwright>=1.40.0  # Browser automation for reading modern websites
+duckduckgo-search>=4.0.0
+wikipedia>=1.4.0
+playwright>=1.40.0
 
-# ===== Optional =====
-# py2app>=0.28.0  # Phase 6: Packaging for macOS
+# Optional
+# py2app>=0.28.0
