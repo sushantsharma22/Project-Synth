@@ -3,10 +3,15 @@
 Uses PyObjC to create a dropdown with text field embedded directly
 """
 
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', message='PyObjCPointer created')
+
 import sys
 from pathlib import Path
 import subprocess
 import threading
+import time
 from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem,
                     NSTextField, NSButton, NSView, NSColor, NSFont,
                     NSNotificationCenter, NSUserNotification, NSUserNotificationCenter,
@@ -14,6 +19,7 @@ from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem,
 from Foundation import NSObject, NSMakeRect, NSMakeSize
 import objc
 from typing import Any, cast
+from src.brain.tools_gemini import web_search_tavily
 
 # PyObjC objects are dynamically dispatched; cast them to Any for the type
 # checker so attribute access (alloc, systemStatusBar, CGColor, etc.) doesn't
@@ -44,6 +50,7 @@ from src.plugins.plugin_manager import PluginManager
 from src.plugins.base_plugin import PluginContext
 from src.rag.web_search import WebSearchRAG
 from src.rag.local_rag import SynthRAG
+from src.ui.chat_manager import ChatManager
 
 
 class CopyableTextView(NSTextView):
@@ -156,6 +163,167 @@ class CopyableTextView(NSTextView):
         return True
 
 
+class InputTextView(CopyableTextView):
+    """Single-line input view based on CopyableTextView for the search bar.
+    This shows a caret inside the menu and handles paste/keyboard properly.
+    """
+    def insertText_(self, text):
+        # Prevent inserting newlines; convert them to spaces
+        # Clear placeholder when actual text is inserted
+        try:
+            if getattr(self, '_is_placeholder', False):
+                self.setString_("")
+                self._is_placeholder = False
+        except Exception:
+            pass
+        if isinstance(text, str) and '\n' in text:
+            text = text.replace('\n', ' ')
+        try:
+            ret = objc.super(InputTextView, self).insertText_(text)
+            # Invoke text change callback if present
+            try:
+                cb = getattr(self, 'on_text_change_callback', None)
+                if cb:
+                    cb()
+            except Exception:
+                pass
+            return ret
+        except Exception:
+            # Fallback - call super on CopyableTextView
+            ret = objc.super(CopyableTextView, self).insertText_(text)
+            try:
+                cb = getattr(self, 'on_text_change_callback', None)
+                if cb:
+                    cb()
+            except Exception:
+                pass
+            return ret
+
+    def keyDown_(self, event):
+        # Called for typing events - clear placeholder if set
+        try:
+            if getattr(self, '_is_placeholder', False):
+                self.setString_("")
+                self._is_placeholder = False
+        except Exception:
+            pass
+        # Detect Enter/Return
+        try:
+            chars = event.characters() if hasattr(event, 'characters') else event.charactersIgnoringModifiers()
+        except Exception:
+            chars = None
+        if chars and (chars == '\r' or chars == '\n'):
+            try:
+                cb = getattr(self, 'on_enter_callback', None)
+                if cb:
+                    cb()
+                    return None
+            except Exception:
+                pass
+        ret = objc.super(InputTextView, self).keyDown_(event)
+        try:
+            cb = getattr(self, 'on_text_change_callback', None)
+            if cb:
+                cb()
+        except Exception:
+            pass
+        return ret
+
+    def setPlaceholder_(self, placeholder):
+        # NSTextView doesn't have a native placeholder; we simply use setString_ if it's empty
+        try:
+            if not self.string() or self.string().strip() == '':
+                self.setString_(placeholder)
+                # Use a flag to indicate this is placeholder text so it can be cleared on focus
+                self._is_placeholder = True
+        except Exception:
+            pass
+
+    def focusIn_(self, sender):
+        # Clear placeholder when focused
+        try:
+            if getattr(self, '_is_placeholder', False):
+                self.setString_("")
+                self._is_placeholder = False
+        except Exception:
+            pass
+
+    def paste_(self, sender):
+        # Clear placeholder before pasting
+        try:
+            if getattr(self, '_is_placeholder', False):
+                self.setString_("")
+                self._is_placeholder = False
+        except Exception:
+            pass
+        # Call CopyableTextView.paste_ (parent class) for actual paste behavior
+        try:
+            ret = CopyableTextView.paste_(self, sender)
+            try:
+                cb = getattr(self, 'on_text_change_callback', None)
+                if cb:
+                    cb()
+            except Exception:
+                pass
+            return ret
+        except Exception:
+            return False
+
+
+class CopyableTextField(NSTextField):
+    """Custom NSTextField that handles first responder, caret visibility and keyboard shortcuts inside menu items."""
+    def acceptsFirstResponder(self):
+        return True
+
+    def becomeFirstResponder(self):
+        try:
+            return objc.super(CopyableTextField, self).becomeFirstResponder()
+        except Exception:
+            return False
+
+    def performKeyEquivalent_(self, event):
+        """Handle common command key equivalents: copy/paste/cut/select all."""
+        modifierFlags = event.modifierFlags()
+        characters = event.charactersIgnoringModifiers()
+
+        # 1<<20 is the NSCommandKeyMask in older headers, use it consistently
+        if modifierFlags & (1 << 20):
+            if characters == 'c':
+                # Call the standard copy action (forward to editor if needed)
+                try:
+                    self.copy_(None)
+                except Exception:
+                    pass
+                return True
+            elif characters == 'v':
+                try:
+                    self.paste_(None)
+                except Exception:
+                    pass
+                return True
+            elif characters == 'x':
+                try:
+                    self.cut_(None)
+                except Exception:
+                    pass
+                return True
+            elif characters == 'a':
+                try:
+                    self.selectAll_(None)
+                except Exception:
+                    pass
+                return True
+        return objc.super(CopyableTextField, self).performKeyEquivalent_(event)
+
+    def validateUserInterfaceItem_(self, item):
+        action = item.action()
+        if action in ('copy:', 'paste:', 'selectAll:', 'cut:'):
+            return True
+        return objc.super(CopyableTextField, self).validateUserInterfaceItem_(item)
+
+
+# Note: Removed CompatNSTextField wrapper class - it was blocking becomeFirstResponder calls
+# Now using CopyableTextField directly with native NSTextField methods (stringValue/setStringValue_)
 
 
 class SynthMenuBarNative(NSObject):
@@ -182,9 +350,26 @@ class SynthMenuBarNative(NSObject):
         self.plugin_manager.load_all_plugins()
         print(f"✅ Loaded {len(self.plugin_manager.plugins)} plugins")
         
+        # Initialize Chat Manager
+        self.chat_manager = ChatManager(max_history=50)
+        print("💬 Chat manager initialized")
+        
+        # UI sizing + layout guard rails
+        self.default_width = 500
+        self.default_result_height = 195
+        self.max_result_height = 600  # Increased from 240 to allow scrolling for long content
+        self.compact_height = 160  # Increased to fit 6 buttons (2 rows)
+        self.current_result_height = self.default_result_height
+        self.menu_open = False
+        # fallback hook for text change callback when textfield doesn't support attribute writes
+        self._text_change_cb = None
+        self._enter_cb = None
+        
         # Clipboard state tracking - stores clipboard text captured by user
         self.captured_clipboard = None  # Text user copied with Cmd+C
         self.clipboard_timestamp = None  # When it was captured
+        self.clipboard_min_chars = 5  # Allow shorter snippets to flow through
+        self.clipboard_max_age = 300   # Seconds before clipboard text expires
         self.start_clipboard_monitor()  # Monitor for Cmd+C events
         
         # Create status bar item
@@ -194,12 +379,16 @@ class SynthMenuBarNative(NSObject):
         
         # Create menu
         self.menu = NSMenu.alloc().init()
+        self.menu.setDelegate_(self)
         
         # Create custom view with text field
         self.create_input_view()
         
         # Add menu items
         self.build_menu()
+        
+        # Default to compact view until a result is shown
+        self.reset_to_compact_view()
         
         # Set menu to status item
         self.statusitem.setMenu_(self.menu)
@@ -208,41 +397,34 @@ class SynthMenuBarNative(NSObject):
     
     def create_input_view(self):
         """Create custom view with embedded text field and result area"""
-        
-        # Container view - MORE COMPACT!
-        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 270))
+
+        # Container view
+        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self.default_width, 310))
         self.input_view.setWantsLayer_(True)
-        
-        # Result text view at TOP - NOW WITH CopyableTextView class!
-        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(10, 65, 480, 195))
-        scroll_view.setBorderType_(0)
-        scroll_view.setDrawsBackground_(False)
+
+        # Layout constants
+        padding = 10
+        inner_width = self.default_width - (padding * 2)  # 480 for default_width 500
+        result_view_height = self.default_result_height
+
+        # ============ RESULT VIEW (TOP) - Scrollable output ============
+        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(padding, 115, inner_width, result_view_height))
+        scroll_view.setBorderType_(1)  # Line border
+        scroll_view.setDrawsBackground_(True)
         scroll_view.setHasVerticalScroller_(True)
+        scroll_view.setHasHorizontalScroller_(False)
+        scroll_view.setAutohidesScrollers_(True)
         scroll_view.setAutoresizingMask_(2)
-        
-        # USE CUSTOM CopyableTextView INSTEAD OF NSTextView!
-        self.result_view = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 465, 195))
+
+        # Result text view - READ-ONLY, scrollable
+        self.result_view = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, inner_width - 20, result_view_height))
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
-        self.result_view.setFont_(NSFont.systemFontOfSize_(12))
-        
-        # GLASSMORPHISM - Apple-style semi-transparent with better visibility
-        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.70))
+        self.result_view.setFont_(NSFont.systemFontOfSize_(13))
+        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.95))
         self.result_view.setTextColor_(NSColor.whiteColor())
-        
-        # Rounded corners
-        try:
-            self.result_view.setWantsLayer_(True)
-            self.result_view.layer().setCornerRadius_(12.0)
-            self.result_view.layer().setMasksToBounds_(True)
-        except:
-            pass
-        
-        # Enable copy operations - CRITICAL SETTINGS
         self.result_view.setAllowsUndo_(False)
-        
-        # Disable substitutions that interfere with copy/paste
         try:
             self.result_view.setAutomaticTextReplacementEnabled_(False)
             self.result_view.setAutomaticQuoteSubstitutionEnabled_(False)
@@ -250,100 +432,121 @@ class SynthMenuBarNative(NSObject):
             self.result_view.setAutomaticSpellingCorrectionEnabled_(False)
         except:
             pass
-        
-        # Text container settings
         try:
-            self.result_view.setUsesFindBar_(True)
-            self.result_view.setImportsGraphics_(False)
-            self.result_view.setUsesFontPanel_(False)
-            self.result_view.setUsesRuler_(False)
-            
-            # Word wrap and padding
+            # Word wrap
             self.result_view.textContainer().setWidthTracksTextView_(True)
-            self.result_view.textContainer().setContainerSize_(NSMakeSize(465, 10000))
-            self.result_view.textContainer().setLineFragmentPadding_(10.0)
+            self.result_view.textContainer().setContainerSize_(NSMakeSize(inner_width - 20, 10000000))
+            self.result_view.textContainer().setLineFragmentPadding_(8.0)
         except:
             pass
-        
         scroll_view.setDocumentView_(self.result_view)
         self.scroll_view = scroll_view
-        
-        # Text input field - NEW PILL-SHAPED SEARCH BAR (fixes copy/paste)
-        self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(10, 30, 480, 30))
-        self.text_field.setWantsLayer_(True)
-        self.text_field.setFocusRingType_(1)  # Use blue focus ring
-        
-        # CRITICAL: Enable editing and selection for copy/paste
-        self.text_field.setEditable_(True)
-        self.text_field.setSelectable_(True)
-        
-        # Style to look modern and pill-shaped
-        self.text_field.setBezeled_(False)
-        self.text_field.setDrawsBackground_(True)
-        self.text_field.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.16, 0.18, 0.8))
-        self.text_field.setTextColor_(NSColor.whiteColor())
-        self.text_field.setFont_(NSFont.systemFontOfSize_(15))
-        self.text_field.setPlaceholderString_("Search or Ask Synth...")
-        
-        # Rounded "pill" shape
-        self.text_field.layer().setCornerRadius_(15.0)
-        
-        # Blue border
-        self.text_field.layer().setBorderWidth_(2.0)
-        self.text_field.layer().setBorderColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.4, 0.8, 0.7).CGColor())
-        
-        # Set Enter key action
-        self.text_field.setTarget_(self)
-        self.text_field.setAction_("handleQuery:")
 
-        # 4 BUTTONS BELOW TEXT INPUT - PROPERLY ALIGNED!
-        # Ask button - BLUE accent color to stand out!
-        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(10, 5, 115, 20))
-        self.ask_button.setTitle_("Ask")
-        self.ask_button.setBezelStyle_(1)
-        self.ask_button.setTarget_(self)
-        self.ask_button.setAction_("handleQuery:")
-        self.ask_button.setKeyEquivalent_("\r")
-        self.ask_button.setFont_(NSFont.systemFontOfSize_(12))
-        # Blue accent color for Ask button
+        # ============ INPUT TEXT VIEW (MIDDLE) - Editable, scrollable, with cursor! ============
+        input_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(padding, 60, inner_width, 50))
+        input_scroll.setBorderType_(1)  # Line border
+        input_scroll.setDrawsBackground_(True)
+        input_scroll.setHasVerticalScroller_(True)
+        input_scroll.setHasHorizontalScroller_(False)
+        input_scroll.setAutohidesScrollers_(True)
+        
+        # INPUT TEXT VIEW - This is the key fix! NSTextView instead of NSTextField
+        self.input_text_view = InputTextView.alloc().initWithFrame_(NSMakeRect(0, 0, inner_width - 20, 50))
+        self.input_text_view.setEditable_(True)
+        self.input_text_view.setSelectable_(True)
+        self.input_text_view.setRichText_(False)
+        self.input_text_view.setFont_(NSFont.systemFontOfSize_(14))
+        self.input_text_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.16, 0.18, 0.98))
+        self.input_text_view.setTextColor_(NSColor.whiteColor())
+        self.input_text_view.setInsertionPointColor_(NSColor.whiteColor())  # White cursor!
         try:
-            self.ask_button.setBezelStyle_(4)  # Rounded rect
+            self.input_text_view.setAutomaticTextReplacementEnabled_(False)
+            self.input_text_view.setAutomaticQuoteSubstitutionEnabled_(False)
+        except:
+            pass
+        try:
+            # Word wrap for input
+            self.input_text_view.textContainer().setWidthTracksTextView_(True)
+            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(inner_width - 20, 10000000))
+            self.input_text_view.textContainer().setLineFragmentPadding_(8.0)
         except:
             pass
         
-        # Screen button - checkbox toggle
-        self.screen_button = NSButton.alloc().initWithFrame_(NSMakeRect(130, 5, 115, 20))
-        self.screen_button.setTitle_("📸 Screen")
-        self.screen_button.setButtonType_(3)  # Checkbox
-        self.screen_button.setBezelStyle_(1)
-        self.screen_button.setState_(0)
-        self.screen_button.setFont_(NSFont.systemFontOfSize_(12))
+        # Set placeholder
+        self.input_text_view.setPlaceholder_("Ask Synth anything...")
         
-        # Copy button - same style as Clear
-        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(250, 5, 115, 20))
+        # Set callback for Enter key
+        self.input_text_view.on_enter_callback = self.handleInputEnter
+        
+        input_scroll.setDocumentView_(self.input_text_view)
+        self.input_scroll = input_scroll
+
+        # ============ 5 BUTTONS (ROW 1) ============
+        btn_spacing = 6
+        btn_count = 5
+        btn_width = int((inner_width - (btn_spacing * (btn_count - 1))) / btn_count)
+        btn_y = 32
+        
+        # Button 1: Ask
+        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding, btn_y, btn_width, 22))
+        self.ask_button.setTitle_("Ask")
+        self.ask_button.setBezelStyle_(4)
+        self.ask_button.setTarget_(self)
+        self.ask_button.setAction_("handleQuery:")
+        self.ask_button.setFont_(NSFont.systemFontOfSize_(11))
+        
+        # Button 2: Agent
+        self.agent_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding + (btn_width + btn_spacing) * 1, btn_y, btn_width, 22))
+        self.agent_button.setTitle_("🤖 Agent")
+        self.agent_button.setBezelStyle_(4)
+        self.agent_button.setTarget_(self)
+        self.agent_button.setAction_("handleAgentQuery:")
+        self.agent_button.setFont_(NSFont.systemFontOfSize_(11))
+        
+        # Button 3: Screen
+        self.screen_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding + (btn_width + btn_spacing) * 2, btn_y, btn_width, 22))
+        self.screen_button.setTitle_("📸 Screen")
+        self.screen_button.setBezelStyle_(4)
+        self.screen_button.setTarget_(self)
+        self.screen_button.setAction_("handleScreen:")
+        self.screen_button.setFont_(NSFont.systemFontOfSize_(11))
+        
+        # Button 4: Copy
+        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding + (btn_width + btn_spacing) * 3, btn_y, btn_width, 22))
         self.copy_button.setTitle_("Copy")
-        self.copy_button.setBezelStyle_(1)
+        self.copy_button.setBezelStyle_(4)
         self.copy_button.setTarget_(self)
         self.copy_button.setAction_("copyResults:")
-        self.copy_button.setFont_(NSFont.systemFontOfSize_(12))
+        self.copy_button.setFont_(NSFont.systemFontOfSize_(11))
         
-        # Clear button
-        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(370, 5, 115, 20))
+        # Button 5: Clear
+        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding + (btn_width + btn_spacing) * 4, btn_y, btn_width, 22))
         self.clear_button.setTitle_("Clear")
-        self.clear_button.setBezelStyle_(1)
-        self.clear_button.setFont_(NSFont.systemFontOfSize_(12))
+        self.clear_button.setBezelStyle_(4)
+        self.clear_button.setFont_(NSFont.systemFontOfSize_(11))
         self.clear_button.setTarget_(self)
         self.clear_button.setAction_("clearResults:")
+
+        # ============ BUTTON 6 (ROW 2) - CHAT ============
+        chat_btn_y = 6
+        self.chat_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding, chat_btn_y, inner_width, 22))
+        self.chat_button.setTitle_("💬 Chat (with context memory)")
+        self.chat_button.setBezelStyle_(4)
+        self.chat_button.setTarget_(self)
+        self.chat_button.setAction_("handleChat:")
+        self.chat_button.setFont_(NSFont.systemFontOfSize_(11))
         
-        # Add to view
+        # Add all views
         self.input_view.addSubview_(scroll_view)
-        self.input_view.addSubview_(self.text_field)
+        self.input_view.addSubview_(input_scroll)
         self.input_view.addSubview_(self.ask_button)
+        self.input_view.addSubview_(self.agent_button)
         self.input_view.addSubview_(self.screen_button)
         self.input_view.addSubview_(self.copy_button)
         self.input_view.addSubview_(self.clear_button)
+        self.input_view.addSubview_(self.chat_button)
         
-        # Initially hide result view
+        # Hidden by default
         self.scroll_view.setHidden_(True)
     
     def build_menu(self):
@@ -408,6 +611,49 @@ class SynthMenuBarNative(NSObject):
         )
         screen_item.setTarget_(self)
         self.menu.addItem_(screen_item)
+
+    def menuWillOpen_(self, menu):
+        """Ensure layout is compact and prompt focused when the menu opens."""
+        self.menu_open = True
+        self.prepare_prompt_entry()
+
+    def menuDidClose_(self, menu):
+        """Normalize layout when the menu closes so it doesn't reopen huge."""
+        self.menu_open = False
+        if not str(self.result_view.string()).strip():
+            self.reset_to_compact_view()
+
+    def prepare_prompt_entry(self):
+        """Shrink layout if empty and focus the text field on the main thread."""
+        if not str(self.result_view.string()).strip():
+            self.reset_to_compact_view()
+        try:
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "focusTextField:", None, False
+            )
+        except Exception as exc:
+            print(f"⚠️ Unable to schedule prompt focus: {exc}")
+
+    def focusTextField_(self, _):
+        """Selector helper that safely focuses the input text view."""
+        try:
+            window = self.input_text_view.window()
+            if window is not None:
+                window.makeFirstResponder_(self.input_text_view)
+                # Set cursor to end
+                try:
+                    text_length = len(str(self.input_text_view.string()))
+                    self.input_text_view.setSelectedRange_((text_length, 0))
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"⚠️ Unable to focus input view: {exc}")
+
+    def reset_to_compact_view(self):
+        """Hide result pane and shrink container back to compact height."""
+        self.scroll_view.setHidden_(True)
+        self.current_result_height = 0
+        self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, self.compact_height))
     
     def showPluginInfo_(self, sender):
         """Execute plugin action when clicked"""
@@ -435,29 +681,26 @@ The plugin will automatically activate when relevant to your query."""
             self.safe_update_result(f"❌ Plugin '{plugin_name}' not found")
     
     def clearResults_(self, sender):
-        """Clear the result area and reset view - also clear the text field!"""
+        """Clear the result area and reset view - also clear the input!"""
         # Clear result area
         self.result_view.setString_("")
-        self.scroll_view.setHidden_(True)
         
-        # Clear the text field AND make it editable again
-        self.text_field.setStringValue_("")
-        self.text_field.setEditable_(True)
+        # Clear the input text view
+        self.input_text_view.setString_("")
+        self.input_text_view.setEditable_(True)
         
         # RESET CLIPBOARD STATE - user must do Cmd+C again to capture new text
         self.captured_clipboard = None
         self.clipboard_timestamp = None
-        print("🔄 Clipboard state reset - press Cmd+C to capture new text")
         
-        # Reset to compact height
-        self.input_view.setFrame_(NSMakeRect(0, 0, 500, 60))
+        # Clear chat history
+        self.chat_manager.clear()
         
-        # Focus back on text field so user can type immediately
-        try:
-            # Make the text field first responder when menu opens
-            NSApp.keyWindow().makeFirstResponder_(self.text_field)
-        except:
-            pass
+        print("🔄 Cleared: Clipboard, Results, and Chat History")
+        self.reset_to_compact_view()
+        
+        # Focus back on input so user can type immediately
+        self.prepare_prompt_entry()
     
     def copyResults_(self, sender):
         """Copy the result text to clipboard - Enhanced version"""
@@ -496,8 +739,6 @@ The plugin will automatically activate when relevant to your query."""
     
     def start_clipboard_monitor(self):
         """Monitor clipboard for Cmd+C events - captures text when user copies"""
-        import time
-        
         def monitor_clipboard():
             pasteboard = NSPasteboard.generalPasteboard()
             last_change_count = pasteboard.changeCount()
@@ -512,12 +753,13 @@ The plugin will automatically activate when relevant to your query."""
                         
                         # Get clipboard text
                         clipboard_text = pasteboard.stringForType_("public.utf8-plain-text")
-                        
-                        if clipboard_text and len(clipboard_text) > 20:
+
+                        normalized = clipboard_text.strip() if clipboard_text else ""
+                        if normalized and len(normalized) >= self.clipboard_min_chars:
                             # Capture this text - user intentionally copied it
-                            self.captured_clipboard = clipboard_text
+                            self.captured_clipboard = normalized
                             self.clipboard_timestamp = time.time()
-                            print(f"📋 Captured clipboard: {len(clipboard_text)} chars")
+                            print(f"📋 Captured clipboard: {len(normalized)} chars")
                     
                     time.sleep(0.5)  # Check every 500ms
                 except Exception as e:
@@ -529,6 +771,36 @@ The plugin will automatically activate when relevant to your query."""
         monitor_thread.start()
         print("👀 Clipboard monitor started")
 
+    def get_recent_clipboard_text(self):
+        """Return recently captured clipboard text that still meets freshness rules."""
+        if not self.captured_clipboard:
+            return self._read_live_clipboard_fallback()
+        text = self.captured_clipboard.strip()
+        if len(text) < self.clipboard_min_chars:
+            return self._read_live_clipboard_fallback()
+        if self.clipboard_timestamp is None:
+            return text
+        age = time.time() - self.clipboard_timestamp
+        if age > self.clipboard_max_age:
+            return self._read_live_clipboard_fallback()
+        return text
+
+    def _read_live_clipboard_fallback(self):
+        """Look directly at the pasteboard in case monitor missed the copy event."""
+        try:
+            pasteboard = NSPasteboard.generalPasteboard()
+            live_text = pasteboard.stringForType_("public.utf8-plain-text")
+            if live_text:
+                normalized = live_text.strip()
+                if len(normalized) >= self.clipboard_min_chars:
+                    self.captured_clipboard = normalized
+                    self.clipboard_timestamp = time.time()
+                    print(f"📋 Live clipboard fallback: {len(normalized)} chars")
+                    return normalized
+        except Exception as exc:
+            print(f"⚠️ Live clipboard fallback failed: {exc}")
+        return None
+
     
     def capture_selected_text(self):
         """
@@ -538,10 +810,34 @@ The plugin will automatically activate when relevant to your query."""
         Returns:
             str: Selected text from active app, or clipboard text as fallback
         """
+        original_clipboard = None
+        saved_pasteboard_items = None
         try:
-            # Save current clipboard content first
+            # Save current clipboard content first (we'll restore it before returning)
             pasteboard = NSPasteboard.generalPasteboard()
             original_clipboard = pasteboard.stringForType_("public.utf8-plain-text")
+            # Try to backup all pasteboard types so we can faithfully restore them
+            try:
+                saved_pasteboard_items = {}
+                types = pasteboard.types() or []
+                for t in types:
+                    try:
+                        data = pasteboard.dataForType_(t)
+                        if data:
+                            saved_pasteboard_items[t] = data
+                            continue
+                    except Exception:
+                        pass
+                    try:
+                        s = pasteboard.stringForType_(t)
+                        if s is not None:
+                            saved_pasteboard_items[t] = s
+                    except Exception:
+                        pass
+                if not saved_pasteboard_items:
+                    saved_pasteboard_items = None
+            except Exception:
+                saved_pasteboard_items = None
             
             # METHOD 1: Try to get selected text using improved AppleScript
             script = '''
@@ -571,6 +867,27 @@ The plugin will automatically activate when relevant to your query."""
                 # Only return if it's different from original clipboard (means new text was selected)
                 if selected_text and selected_text != original_clipboard:
                     print(f"✅ Captured selected text: {len(selected_text)} chars")
+                    # Restore the original clipboard so we don't surprise the user
+                    try:
+                        pasteboard = NSPasteboard.generalPasteboard()
+                        pasteboard.clearContents()
+                        if saved_pasteboard_items:
+                            # Restore all types we captured
+                            for k, v in saved_pasteboard_items.items():
+                                try:
+                                    if isinstance(v, str):
+                                        pasteboard.setString_forType_(v, k)
+                                    else:
+                                        pasteboard.setData_forType_(v, k)
+                                except Exception:
+                                    # Fall back to plaintext for safety
+                                    if original_clipboard:
+                                        pasteboard.setString_forType_(original_clipboard, "public.utf8-plain-text")
+                                        break
+                        elif original_clipboard:
+                            pasteboard.setString_forType_(original_clipboard, "public.utf8-plain-text")
+                    except Exception as exc:
+                        print(f"⚠️ Failed to restore original clipboard: {exc}")
                     return selected_text
             
             # METHOD 2: Fallback - just read current clipboard
@@ -590,10 +907,32 @@ The plugin will automatically activate when relevant to your query."""
                 return clipboard_text if clipboard_text else ""
             except:
                 return ""
+        finally:
+            # Always restore original clipboard if it was changed by the AppleScript
+            try:
+                pasteboard = NSPasteboard.generalPasteboard()
+                current = pasteboard.stringForType_("public.utf8-plain-text")
+                if saved_pasteboard_items:
+                    # If we have a backup of items, ensure they are still set; otherwise restore
+                    pass  # We restore already in the try-block above
+                else:
+                    if original_clipboard is None and current is not None:
+                        # If we previously had nothing, clear the clipboard
+                        pasteboard.clearContents()
+                    elif original_clipboard is not None and current != original_clipboard:
+                        pasteboard.clearContents()
+                        pasteboard.setString_forType_(original_clipboard, "public.utf8-plain-text")
+            except Exception:
+                # Non-fatal; continue
+                pass
     
-    def screenWithQuery_(self, sender):
-        """Auto-capture screen + use query - ONE CLICK!"""
-        query = str(self.text_field.string()).strip()
+    def handleInputEnter(self):
+        """Handle Enter key in input text view - triggers Ask button"""
+        self.handleQuery_(None)
+    
+    def handleScreen_(self, sender):
+        """Handle Screen button"""
+        query = str(self.input_text_view.string()).strip()
         
         if not query:
             # If no query, just do screen analysis
@@ -602,37 +941,219 @@ The plugin will automatically activate when relevant to your query."""
             # Use the query WITH screen capture automatically
             self.analyze_screen_with_query(query)
     
-    def handleQuery_(self, sender):
-        """Handle query from text field - NOW USES AGENTIC EXECUTION"""
-        query = str(self.text_field.stringValue()).strip()
+    def handleChat_(self, sender):
+        """Handle CHAT button - Conversational AI with context memory"""
+        query = str(self.input_text_view.string()).strip()
         
         if not query:
+            # Show conversation history if no input
+            conversation = self.chat_manager.get_full_conversation()
+            self.safe_update_result(conversation)
+            self.scroll_view.setHidden_(False)
+            self.expand_view_for_content(300)
             return
         
-        # Clear input immediately
-        self.text_field.setStringValue_("")
+        # Clear input
+        self.input_text_view.setString_("")
         
         # Show result area
         self.scroll_view.setHidden_(False)
         self.expand_view_for_content(100)
         
-        # Show loading immediately
-        self.result_view.setString_("🤖 Agent thinking...")
+        # Add user message to history
+        self.chat_manager.add_message('user', query)
+        
+        # Show loading
+        self.result_view.setString_("💬 Chat mode - thinking with full context...")
         
         import threading
         
+        def process_chat():
+            try:
+                # Get conversation context (last 10 messages)
+                context = self.chat_manager.get_context(last_n=10)
+                
+                # Build prompt with context
+                from datetime import datetime
+                current_time = datetime.now().strftime("%I:%M %p")
+                
+                prompt = f"""You are Synth, a helpful AI assistant. Current time: {current_time}
+
+{context}
+
+👤 User:
+{query}
+
+🤖 Assistant:
+Respond naturally and conversationally. Remember the context from earlier messages."""
+                
+                # Use general_chat for conversational response
+                from src.brain.tools_gemini import general_chat
+                response = general_chat(prompt)
+                
+                # Add assistant response to history
+                self.chat_manager.add_message('assistant', response)
+                
+                # Show full conversation
+                full_chat = self.chat_manager.get_full_conversation()
+                self.safe_update_result(full_chat)
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"❌ Chat Error: {str(e)}\n\n{traceback.format_exc()}"
+                self.safe_update_result(error_msg)
+        
+        # Run in background
+        thread = threading.Thread(target=process_chat)
+        thread.daemon = True
+        thread.start()
+    
+    def handleQuery_(self, sender):
+        """Handle ASK button - Simple Q&A with decision router"""
+        query = str(self.input_text_view.string()).strip()
+
+        if not query:
+            return
+
+        # Clear input immediately
+        self.input_text_view.setString_("")
+
+        # Show result area
+        self.scroll_view.setHidden_(False)
+        self.expand_view_for_content(100)
+
+        # Show loading immediately
+        self.result_view.setString_("🤖 Autonomous agent thinking...")
+
+        import threading, re
+
         def process_in_background():
             try:
-                # Get selected text if user captured it with Cmd+C
-                selected_text = self.captured_clipboard if (self.captured_clipboard and len(self.captured_clipboard) > 20) else None
+                # Check if this is explain/paraphrase and we have captured clipboard
+                query_lower = query.lower()
+                clipboard_commands = {'explain', 'paraphrase', 'rephrase', 'rewrite', 'summarize', 'show', 'what did i copy'}
+
+                if any(cmd in query_lower for cmd in clipboard_commands):
+                    clipboard_text = self.get_recent_clipboard_text()
+                    if clipboard_text:
+                        print(f"🎯 Using captured clipboard for '{query}': {len(clipboard_text)} chars")
+
+                        # Show clipboard - just echo it back
+                        if any(word in query_lower for word in ['show', 'what did i copy', 'clipboard']):
+                            result = f"📋 You copied:\n\n{clipboard_text}"
+                            self.safe_update_result(result)
+                            return
+
+                        # Determine target term (like 'qiskit') for focused explanation
+                        def extract_target_sentence(clip_text, token):
+                            sents = re.split(r'(?<=[\.\?!])\s+', clip_text)
+                            for s in sents:
+                                if token.lower() in s.lower():
+                                    return s.strip()
+                            return None
+
+                        target_term = None
+                        m = re.search(r'explain\s+([A-Za-z0-9_\-+.]+)', query_lower)
+                        if m:
+                            target_term = m.group(1)
+                        else:
+                            tokens = [re.sub(r'["(),.]', '', t) for t in re.split(r"\s+", query_lower) if len(t) > 2]
+                            for t in tokens:
+                                if t in clipboard_text.lower():
+                                    target_term = t
+                                    break
+
+                        if target_term:
+                            extracted = extract_target_sentence(clipboard_text, target_term)
+                            if extracted:
+                                selected_for_explain = extracted
+                            else:
+                                selected_for_explain = clipboard_text
+                        else:
+                            selected_for_explain = clipboard_text
+
+                        # Use Decision Router to pick the tool
+                        from src.brain.decision_router import decide_tool
+                        decision = decide_tool(query, selected_for_explain if selected_for_explain else None)
+                        # DEBUG: Decision router returned
+                        action = decision.get('action')
+
+                        pass
+                        if action == 'local':
+                            # Use simplified agent for local actions
+                            from src.brain.agent_simple import execute_autonomous as simple_execute
+                            result = simple_execute(query)
+                            print(f"Model used: LOCAL_AGENT")
+                            self.safe_update_result(result)
+                            return
+
+                        if action == 'web':
+                            # Use callable web search function from tools_gemini (plain function)
+                            result = web_search_tavily(query)
+                            print(f"Model used: WebSearch (Tavily)")
+                            self.safe_update_result(result)
+                            return
+
+                        if action == 'llm':
+                            # Decide which LLM tool to call
+                            tool_key = decision.get('tool')
+                            pass
+                            if tool_key == 'llm_explain' and selected_for_explain:
+                                from src.brain.tools_gemini import explain_text
+                                pass
+                                from src.brain.tools_gemini import LAST_USED_MODEL
+                                # If we found a target term like 'Qiskit' or 'BAKE', pass it so the model focuses on
+                                # that term within the provided sentence/clip instead of summarizing the entire paragraph.
+                                explanation = explain_text(selected_for_explain, focus_term=target_term)
+                                pass
+                                print(f"Model used: {LAST_USED_MODEL}")
+                                # Do NOT display the model name in the UI; only log it for debugging
+                                self.safe_update_result(explanation)
+                                pass
+                                return
+                            if tool_key == 'llm_paraphrase' and selected_for_explain:
+                                from src.brain.tools_gemini import paraphrase_text
+                                from src.brain.tools_gemini import LAST_USED_MODEL
+                                paraphrased = paraphrase_text(selected_for_explain)
+                                print(f"Model used: {LAST_USED_MODEL}")
+                                self.safe_update_result(paraphrased)
+                                return
+                            # Default to general chat
+                            from src.brain.tools_gemini import general_chat
+                            from src.brain.tools_gemini import LAST_USED_MODEL
+                            result = general_chat(query)
+                            print(f"Model used: {LAST_USED_MODEL}")
+                            self.safe_update_result(result)
+                            return
+                        
+                        # Paraphrase/rewrite
+                        elif any(word in query_lower for word in ['paraphrase', 'rephrase', 'rewrite']):
+                            from src.brain.tools_gemini import paraphrase_text
+                            result = paraphrase_text(selected_for_explain)
+                            self.safe_update_result(result)
+                            return
+                        
+                        # Summarize
+                        elif 'summarize' in query_lower:
+                            # Use Gemini for summary
+                            from src.brain.tools_gemini import general_chat
+                            summary_prompt = f"Summarize this in 2-3 sentences:\n\n{clipboard_text}"
+                            result = general_chat(summary_prompt)
+                            self.safe_update_result(result)
+                            return
+                        
+                        else:
+                            # Let agent handle it
+                            result = self.brain.execute_command(query)
+                            self.safe_update_result(result)
+                            return
+                    else:
+                        # No clipboard - guide user
+                        self.safe_update_result("📋 Please copy some text with Cmd+C first, then ask me to explain/paraphrase it.")
+                        return
                 
-                if selected_text:
-                    self.safe_update_result(f"📋 Using captured text ({len(selected_text)} chars)\n🤖 Agent processing...")
-                else:
-                    self.safe_update_result("🤖 Agent processing query...")
-                
-                # EXECUTE AGENTIC TASK - this is the new agent logic!
-                result = self.brain.execute_agentic_task(query, selected_text)
+                # AUTONOMOUS AGENT - decides which tools to use
+                result = self.brain.execute_command(query)
                 
                 # Display result
                 self.safe_update_result(result)
@@ -647,18 +1168,61 @@ The plugin will automatically activate when relevant to your query."""
         thread.daemon = True
         thread.start()
     
+    def handleAgentQuery_(self, sender):
+        """Handle AGENT button - Full autonomous mode with all 41 tools"""
+        query = str(self.input_text_view.string()).strip()
+
+        if not query:
+            return
+
+        # Clear input immediately
+        self.input_text_view.setString_("")
+
+        # Show result area
+        self.scroll_view.setHidden_(False)
+        self.expand_view_for_content(100)
+
+        # Show loading immediately
+        self.result_view.setString_("🤖 Autonomous Agent Mode - Using all 41 tools...\n\nAnalyzing your request...")
+
+        import threading
+
+        def process_in_background():
+            try:
+                # Use the autonomous agent directly with execute_autonomous
+                from src.brain.agent_core import execute_autonomous
+                
+                self.safe_update_result("🤖 Agent thinking...\n\nUsing: File operations, App control, System monitoring, AI processing, Web search...")
+                
+                # Execute with autonomous agent (uses LangGraph to pick tools)
+                result = execute_autonomous(query, max_retries=2, timeout=90)
+                
+                # Display result
+                self.safe_update_result(result)
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"❌ Agent Error: {str(e)}\n\n{traceback.format_exc()}"
+                self.safe_update_result(error_msg)
+        
+        # Run in background thread so Mac doesn't freeze
+        thread = threading.Thread(target=process_in_background)
+        thread.daemon = True
+        thread.start()
+    
     def expand_view_for_content(self, content_height):
         """Expand the view to fit content"""
-        
-        # Calculate new total height
-        result_height = min(240, max(80, content_height))
+        # Calculate new total height with guard rails
+        result_height = min(self.max_result_height, max(80, content_height))
         new_total_height = result_height + 70
+        self.current_result_height = result_height
         
         # Resize scroll view (result area)
+        self.scroll_view.setHidden_(False)
         self.scroll_view.setFrame_(NSMakeRect(10, 65, 480, result_height))
         
         # Resize container
-        self.input_view.setFrame_(NSMakeRect(0, 0, 500, new_total_height))
+        self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, new_total_height))
     
     def needs_web_search(self, query: str) -> bool:
         """
@@ -711,10 +1275,8 @@ The plugin will automatically activate when relevant to your query."""
         def process_in_background():
             try:
                 # ASK BUTTON = Use CAPTURED clipboard (from Cmd+C monitoring)
-                # Check if user has captured clipboard text (by pressing Cmd+C)
-                if self.captured_clipboard and len(self.captured_clipboard) > 20:
-                    # User did Cmd+C and we have captured text - use it!
-                    clipboard_text = self.captured_clipboard
+                clipboard_text = self.get_recent_clipboard_text()
+                if clipboard_text:
                     self.safe_update_result(f"📋 Using captured text ({len(clipboard_text)} chars)\n🧠 Analyzing...")
                     
                     enhanced_query = f"""QUESTION: {query}
@@ -732,8 +1294,16 @@ CRITICAL INSTRUCTIONS:
 ANSWER:"""
                     
                     result = self.brain.ask(enhanced_query, mode="balanced", max_tokens=400)
+                    try:
+                        from src.brain.tools_gemini import LAST_USED_MODEL
+                        print(f"Model used (Ask button): {LAST_USED_MODEL}")
+                    except Exception:
+                        pass
                     self.safe_update_result(result)
                     return
+                elif self.captured_clipboard and not clipboard_text:
+                    # Clipboard exists but expired/too short - guide user silently
+                    print("⚠️ Captured clipboard text is stale or too short. Waiting for a fresh Cmd+C event.")
                 
                 # No captured clipboard - continue with normal flow (web search/plugins)
                 # Check if query needs web search (RAG)
@@ -763,6 +1333,16 @@ ANSWER:"""
                         
                         # Send to Brain with web context
                         result = self.brain.ask(enhanced_query, mode="balanced")
+                        try:
+                            from src.brain.tools_gemini import LAST_USED_MODEL
+                            print(f"Model used (Web RAG): {LAST_USED_MODEL}")
+                        except Exception:
+                            pass
+                        try:
+                            from src.brain.tools_gemini import LAST_USED_MODEL
+                            print(f"Model used (Web RAG): {LAST_USED_MODEL}")
+                        except Exception:
+                            pass
                         
                         # Add sources at the end
                         sources_text = "\n\n📚 Sources:\n"
@@ -815,6 +1395,11 @@ ANSWER:"""
                 else:
                     # STEP 3: No plugin matched, use Brain directly
                     result = self.brain.ask(query, mode="balanced")
+                    try:
+                        from src.brain.tools_gemini import LAST_USED_MODEL
+                        print(f"Model used (Fallback): {LAST_USED_MODEL}")
+                    except Exception:
+                        pass
                     self.safe_update_result(result)
                 
             except Exception as e:
@@ -884,9 +1469,14 @@ ANSWER:"""
                            any(word in query_lower for word in ['explain', 'what', 'define', 'meaning', 'describe'])
                 
                 if needs_web:
-                    # FORCE web search for better context
-                    terms_preview = ', '.join(all_technical_terms[:5]) if all_technical_terms else query
-                    self.safe_update_result(f"🔍 Key terms: {terms_preview}\n🌐 Searching web for latest info...")
+                    # FORCE web search for better context - show brief preview
+                    if all_technical_terms:
+                        terms_preview = ', '.join(all_technical_terms[:5])
+                    else:
+                        # Show first 7-8 words of query
+                        words = query.split()[:8]
+                        terms_preview = ' '.join(words) + ('...' if len(query.split()) > 8 else '')
+                    self.safe_update_result(f"🔍 Searching: {terms_preview}...")
                     
                     # Build search terms: prioritize extracted terms
                     all_search_results = []
@@ -919,7 +1509,9 @@ ANSWER:"""
                             
                             if search_results['sources_count'] > 0:
                                 all_search_results.extend(search_results['results'][:2])
-                                self.safe_update_result(f"🔍 Searching: {term}\n✓ Found {search_results['sources_count']} sources...")
+                                # Just show brief update, not full details
+                                term_preview = term[:30] + '...' if len(term) > 30 else term
+                                self.safe_update_result(f"🔍 {term_preview}")
                         except Exception as e:
                             print(f"Search failed for {term}: {e}")
                     
@@ -970,6 +1562,16 @@ ANSWER:"""
                     
                     # Increase max_tokens for comprehensive answer
                     result = self.brain.ask(enhanced_prompt, mode="balanced", max_tokens=800)
+                    try:
+                        from src.brain.tools_gemini import LAST_USED_MODEL
+                        print(f"Model used (RAG+Web comprehensive): {LAST_USED_MODEL}")
+                    except Exception:
+                        pass
+                    try:
+                        from src.brain.tools_gemini import LAST_USED_MODEL
+                        print(f"Model used (RAG+Web): {LAST_USED_MODEL}")
+                    except Exception:
+                        pass
                     
                     # Add sources
                     if all_search_results:
@@ -992,6 +1594,11 @@ ANSWER:"""
 
                     self.safe_update_result("🧠 Analyzing with AI...")
                     result = self.brain.ask(enhanced_prompt, mode="balanced", max_tokens=600)
+                    try:
+                        from src.brain.tools_gemini import LAST_USED_MODEL
+                        print(f"Model used (Simple context): {LAST_USED_MODEL}")
+                    except Exception:
+                        pass
                     self.safe_update_result(result)
                 
             except Exception as e:
@@ -1026,9 +1633,10 @@ ANSWER:"""
         """Update result view on the main thread (selector method - note the trailing underscore)."""
         try:
             self.result_view.setString_(text)
-            # Calculate height based on text length (optimized)
+            # Calculate height based on text length (optimized for longer content)
             line_count = text.count('\n') + 1
-            text_height = max(80, min(300, line_count * 20))
+            # Allow more room for longer text, max 600px for scrolling
+            text_height = max(80, min(600, line_count * 18 + 40))
             self.expand_view_for_content(text_height)
         except Exception:
             pass
@@ -1156,6 +1764,15 @@ def main():
     """Main entry point"""
     print("🚀 Starting Synth Menu Bar (Native)...")
     
+    # Config - show Gemini fallback status
+    from dotenv import load_dotenv
+    load_dotenv()
+    import os
+    fb = os.getenv('GEMINI_FALLBACK_MODELS') or '(default)'
+    free_only = os.getenv('GEMINI_FREE_TIER_ONLY', 'true')
+    print(f"🔧 Gemini fallback models: {fb}")
+    print(f"🔧 Gemini free-tier-only set: {free_only}")
+
     # Create app
     app = NSApplication.sharedApplication()
     
