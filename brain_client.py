@@ -47,6 +47,24 @@ class DeltaBrain:
             "smart": "qwen2.5:14b"
         }
     
+    def execute_command(self, command: str) -> str:
+        """Execute command using autonomous agent with Gemini AI
+        
+        NEW METHOD: Uses pattern-based routing + Gemini for general questions.
+        
+        Args:
+            command: User query/command
+            
+        Returns:
+            Agent's response
+        """
+        try:
+            from src.brain.agent_gemini import execute_autonomous
+            return execute_autonomous(command)
+        except Exception as e:
+            import traceback
+            return f"❌ Agent error: {str(e)}\n{traceback.format_exc()[:200]}"
+    
     def ask(self, prompt, mode="balanced", max_tokens=None):
         """Send question to Brain
         
@@ -87,7 +105,7 @@ class DeltaBrain:
         except requests.exceptions.Timeout:
             return f"Timeout Error: Brain took longer than 90 seconds to respond.\nTry using 'fast' mode or check if Brain is overloaded."
         except requests.exceptions.ConnectionError:
-            return f"Connection Error: Cannot connect to Brain on port {port}.\nMake sure SSH tunnel is active with: ./scripts/brain_monitor_key.sh"
+            return f"Connection Error: Cannot connect to Brain on port {port}.\nMake sure SSH tunnel is active with: ./scripts/connect_brain_key.sh"
         except requests.exceptions.RequestException as e:
             return f"Connection Error: {str(e)}\nMake sure SSH tunnel is active!"
         except KeyError:

@@ -231,7 +231,7 @@ What action should I take to help the user?"""
         except requests.exceptions.Timeout:
             raise Exception(f"Request timeout after {self.timeout}s - Brain may be overloaded")
         except requests.exceptions.ConnectionError:
-            raise Exception(f"Connection failed - Is Brain running? Check SSH tunnel on port {port}")
+            raise Exception(f"Connection failed - Is Brain running? Start SSH tunnel: ./scripts/connect_brain_key.sh (port {port})")
         except requests.exceptions.RequestException as e:
             raise Exception(f"Request error: {str(e)}")
     
@@ -325,7 +325,7 @@ if __name__ == "__main__":
     if client.check_connection():
         print("✅ Brain is online!")
     else:
-        print("❌ Brain is offline. Start with: ./brain_monitor_key.sh")
+        print("❌ Brain is offline. Start with: ./scripts/connect_brain_key.sh")
         sys.exit(1)
     
     # Create a test context package
