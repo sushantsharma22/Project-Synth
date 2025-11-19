@@ -1057,7 +1057,7 @@ Use the buttons below for:
             self.analyze_screen_with_query(query)
     
     def handleChat_(self, sender):
-        """Handle CHAT in chat mode - ReAct Agent with Iterative Web Search"""
+        """Handle CHAT in chat mode - Conversational AI with context memory and auto web search"""
         query = str(self.input_text_view.string()).strip()
         
         if not query:
@@ -1081,48 +1081,134 @@ Use the buttons below for:
         
         # Show immediate progress
         current_time = datetime.now().strftime("%I:%M:%S %p")
-        loading_msg = f"💬 Chat Mode - ReAct Agent\n\n[{current_time}] 👤 You:\n{query}\n\n"
-        self.safe_update_result(loading_msg + "💭 Initializing agent...")
+        loading_msg = f"💬 Chat Mode\n\n[{current_time}] 👤 You:\n{query}\n\n"
+        self.safe_update_result(loading_msg + "💭 Processing your question...")
         
         import threading
+        import time as time_module
         
         def process_chat():
             try:
                 from datetime import datetime
                 
-                # Progress callback for agent iterations
-                def show_progress(msg: str):
-                    """Update UI with agent's progress"""
-                    progress_text = loading_msg + msg
-                    self.safe_update_result(progress_text)
+                # Enhanced keyword detection for web search
+                query_lower = query.lower()
+                current_event_keywords = [
+                    'latest', 'news', 'polls', 'election', 'today', 'recent', 
+                    '2025', '2024', 'current', 'now', 'this week', 'this month',
+                    'trending', 'breaking', 'update', 'new', 'what is happening',
+                    'tell me about', 'bihar', 'canada', 'immigration', 'politics'
+                ]
                 
-                # Get conversation context for agent
-                conversation_context = self.chat_manager.get_context(last_n=10)
+                needs_web_search = any(keyword in query_lower for keyword in current_event_keywords)
                 
-                # Use new ReAct agent for chat mode
-                from src.brain.agent_modes import chat_mode_agent
+                web_context = ""
+                sources_text = ""
                 
-                print(f"🤖 Chat Agent: Processing query with iterative web search...")
+                # Automatic web search if needed - WITH VERIFICATION
+                if needs_web_search:
+                    try:
+                        self.safe_update_result(loading_msg + "🔍 Searching web for latest information...")
+                        time_module.sleep(0.2)  # Let user see progress
+                        
+                        print(f"🔍 Web search triggered for: {query}")
+                        
+                        # Search web
+                        search_results = self.web_search.search(query, include_news=True)
+                        
+                        print(f"📊 Web search found: {search_results['sources_count']} sources")
+                        
+                        if search_results['sources_count'] > 0:
+                            # Build web context with STRONG emphasis on recency
+                            web_context = f"\n\nCRITICAL: Answer ONLY using these web search results from November 2025:\n\n"
+                            web_context += f"WEB SEARCH RESULTS ({search_results['sources_count']} sources from November 2025):\n"
+                            web_context += search_results['context'][:4000]  # First 4000 chars
+                            
+                            # Prepare sources for display
+                            sources_text = "\n\n📚 Sources:\n"
+                            for i, res in enumerate(search_results['results'][:5], 1):
+                                sources_text += f"{i}. {res.title}\n   {res.source}\n"
+                            
+                            self.safe_update_result(loading_msg + f"🔍 Found {search_results['sources_count']} sources | 🤖 Generating answer...")
+                            time_module.sleep(0.2)
+                        else:
+                            print("⚠️ No web sources found, using AI knowledge")
+                    except Exception as e:
+                        print(f"⚠️ Web search failed: {e}")
+                        # Continue without web search
                 
-                response = chat_mode_agent(
-                    query=query,
-                    conversation_context=conversation_context,
-                    progress_callback=show_progress,
-                    max_iterations=15
-                )
+                # Get conversation context (AFTER web results for lower priority)
+                context = self.chat_manager.get_context(last_n=10)
                 
-                # Clean up response (remove any agent artifacts)
-                response = response.strip()
-                if response.startswith("🤖"):
-                    response = response[1:].strip()
+                # Build comprehensive prompt - WEB RESULTS FIRST for highest priority
+                current_time = datetime.now().strftime("%I:%M %p")
+                current_date = datetime.now().strftime("%B %d, %Y")
                 
-                print(f"✅ Chat Agent: Response complete ({len(response)} chars)")
+                # CRITICAL: Put date and web results at TOP of prompt
+                prompt = f"""CURRENT DATE: {current_date}
+CURRENT TIME: {current_time}
+
+YOU MUST use the web search results dated November 2025 below.
+If the question is about anything look for latest news or articles.
+{web_context}
+
+CONVERSATION HISTORY:
+{context}
+
+CURRENT DATE (REMINDER): {current_date}
+
+👤 User:
+{query}
+
+🤖 Synth:
+Base your answer on the November 2025 web results above.
+Respond naturally and conversationally. Remember the context from earlier messages.
+{"CRITICAL: Use ONLY the November 2025 web search results. Ignore any outdated information about the topic." if web_context else ""}
+Keep your response concise but complete (aim for 200-400 words).
+Answer in ENGLISH ONLY."""
+                
+                # Use general_chat for conversational response - WITH ERROR HANDLING
+                try:
+                    from src.brain.tools_gemini import general_chat
+                    response = general_chat(prompt)
+                    
+                    # Clean up response (remove 🤖 prefix if present)
+                    response = response.strip()
+                    if response.startswith("🤖"):
+                        response = response[1:].strip()
+                    
+                except Exception as api_error:
+                    error_str = str(api_error).lower()
+                    # Check for quota/rate limit errors
+                    if any(keyword in error_str for keyword in ['quota', '429', 'resource_exhausted', 'rate limit']):
+                        response = f"""⚠️ API Quota Exceeded
+
+The Gemini API has hit its daily quota limit (200 requests/day on free tier).
+
+**What you can do:**
+1. Wait 1 hour and try again
+2. Upgrade to a paid plan for higher limits
+3. Use the Ask or Agent buttons (they may have quota left)
+
+Your conversation history is preserved. The quota resets in approximately 1 hour."""
+                        print(f"❌ API Quota Error: {api_error}")
+                    elif 'timeout' in error_str:
+                        response = "⚠️ Request timed out. Please try a shorter question or check your internet connection."
+                        print(f"❌ Timeout Error: {api_error}")
+                    elif 'network' in error_str or 'connection' in error_str:
+                        response = "⚠️ Cannot connect to AI service. Please check your internet connection and try again."
+                        print(f"❌ Network Error: {api_error}")
+                    else:
+                        # Generic error with first 200 chars
+                        error_preview = str(api_error)[:200]
+                        response = f"❌ Error: {error_preview}\n\nPlease try again or use a different question."
+                        print(f"❌ API Error: {api_error}")
                 
                 # Add assistant response to history
                 self.chat_manager.add_message('assistant', response)
                 
                 # Build full conversation display (OPTIMIZED - last 20 messages only)
-                conversation_display = "💬 Chat Mode - ReAct Agent\n\n"
+                conversation_display = "💬 Chat Mode - Conversation\n\n"
                 
                 # Get messages (limit to last 20 for performance)
                 messages_to_show = self.chat_manager.messages[-20:] if len(self.chat_manager.messages) > 20 else self.chat_manager.messages
@@ -1140,6 +1226,10 @@ Use the buttons below for:
                         message_parts.append(f"[{time_str}] 🤖 Synth:\n{msg.content}\n\n")
                 
                 conversation_display += ''.join(message_parts)
+                
+                # Add sources if web search was used
+                if sources_text:
+                    conversation_display += sources_text
                 
                 # Display full conversation (with size limit for performance)
                 if len(conversation_display) > 50000:  # 50KB limit
@@ -1172,7 +1262,7 @@ Use the buttons below for:
                 
             except Exception as e:
                 import traceback
-                error_msg = f"❌ Chat Agent Error: {str(e)[:200]}\n\nPlease try again. Your conversation history is preserved."
+                error_msg = f"❌ Chat Error: {str(e)[:200]}\n\nPlease try again. Your conversation history is preserved."
                 
                 # Keep conversation visible above error
                 try:
@@ -1190,7 +1280,14 @@ Use the buttons below for:
         thread.start()
     
     def handleQuery_(self, sender):
-        """Handle ASK button - ReAct Agent with Smart Q&A"""
+        """Handle ASK button - Fast intelligent Ollama routing (5-15 seconds)
+        
+        NEW IMPLEMENTATION:
+        - Uses ONLY Ollama (zero Gemini API calls)
+        - Intelligent routing: WEB_SEARCH, OLLAMA_ONLY, MULTI_QUERY
+        - Fast: 5-15 seconds for single queries, 20-30s for multi-queries
+        - Full logging to logs/ask_button/ask_session_TIMESTAMP.log
+        """
         query = str(self.input_text_view.string()).strip()
 
         if not query:
@@ -1204,45 +1301,212 @@ Use the buttons below for:
         self.expand_view_for_content(100)
 
         # Show loading immediately
-        self.result_view.setString_("💭 Ask Mode - ReAct Agent\n\nAnalyzing your request...")
+        self.safe_update_result("💭 Analyzing query...")
 
         import threading
+        import time
+        import traceback
 
         def process_in_background():
+            # Initialize logger
+            from utils.ask_button_logger import get_logger
+            logger = get_logger()
+            
+            start_time = time.time()
+            logger.log_query(query)
+            
             try:
-                # Progress callback for agent iterations
-                def show_progress(msg: str):
-                    """Update UI with agent's progress"""
-                    progress_text = f"💭 Ask Mode - ReAct Agent\n\n{msg}"
-                    self.safe_update_result(progress_text)
+                # ═══════════════════════════════════════════════════════════
+                # STEP 1: ROUTE THE QUERY (Ollama 3B fast, ~1 second)
+                # ═══════════════════════════════════════════════════════════
+                self.safe_update_result("💭 Analyzing query...")
                 
-                # Get clipboard text if available
-                clipboard_text = self.get_recent_clipboard_text()
+                route_start = time.time()
+                route = self.brain.classify_query_ollama(query)
+                route_time = time.time() - route_start
                 
-                if clipboard_text:
-                    print(f"📋 Ask Agent: Using clipboard context ({len(clipboard_text)} chars)")
+                logger.log_routing(route, f"Ollama 3B classification in {route_time:.2f}s")
+                logger.log_timing("routing", route_time)
                 
-                # Use new ReAct agent for ask mode
-                from src.brain.agent_modes import ask_mode_agent
+                print(f"🎯 Route: [{route}] ({route_time:.2f}s)")
                 
-                print(f"🤖 Ask Agent: Processing query with smart tool selection...")
+                # ═══════════════════════════════════════════════════════════
+                # STEP 2A: MULTI_QUERY - Split and process each
+                # ═══════════════════════════════════════════════════════════
+                if route == "MULTI_QUERY":
+                    self.safe_update_result("🔄 Detected multiple questions. Splitting...")
+                    logger.log_tool_execution("split_multi_query", {"query": query})
+                    
+                    # Split into sub-questions
+                    sub_queries = self.brain.split_multi_query(query)
+                    logger.log_event("MULTI_QUERY_SPLIT", {"count": len(sub_queries), "queries": sub_queries})
+                    
+                    self.safe_update_result(f"🔄 Processing {len(sub_queries)} questions...")
+                    
+                    sub_answers = []
+                    
+                    for i, sub_q in enumerate(sub_queries, 1):
+                        self.safe_update_result(f"🔄 Question {i}/{len(sub_queries)}: {sub_q[:50]}...")
+                        logger.log_event("SUB_QUERY_START", {"index": i, "query": sub_q})
+                        
+                        sub_start = time.time()
+                        
+                        # Search web for each sub-question
+                        logger.log_tool_execution("web_search", {"query": sub_q})
+                        search_results = self.web_search.search(sub_q, include_news=True)
+                        
+                        if search_results['sources_count'] > 0:
+                            # Synthesize with Ollama 7B
+                            logger.log_tool_execution("synthesize_ollama", {
+                                "mode": "balanced",
+                                "source_count": search_results['sources_count']
+                            })
+                            logger.log_model_used("qwen2.5:7b", "balanced")
+                            
+                            sub_answer = self.brain.synthesize_web_results(sub_q, search_results)
+                            sub_answers.append(f"**Q{i}: {sub_q}**\n\n{sub_answer}\n")
+                        else:
+                            # No web results, use Ollama directly
+                            logger.log_model_used("qwen2.5:7b", "balanced")
+                            sub_answer = self.brain.ask(sub_q, mode="balanced", max_tokens=300)
+                            sub_answers.append(f"**Q{i}: {sub_q}**\n\n{sub_answer}\n")
+                        
+                        sub_time = time.time() - sub_start
+                        logger.log_timing(f"sub_query_{i}", sub_time)
+                    
+                    # Combine all sub-answers with Ollama 14B (smart mode)
+                    self.safe_update_result("🤖 Combining answers...")
+                    logger.log_tool_execution("combine_answers", {"mode": "smart"})
+                    logger.log_model_used("qwen2.5:14b", "smart")
+                    
+                    combined_prompt = f"""Combine these answers into one coherent, well-organized response:
+
+Original question: {query}
+
+Answers:
+{''.join(sub_answers)}
+
+Create a unified response that flows naturally. Keep all important information."""
+                    
+                    final_answer = self.brain.ask(combined_prompt, mode="smart", max_tokens=800)
+                    
+                    total_time = time.time() - start_time
+                    logger.log_response(final_answer)
+                    logger.log_timing("total", total_time)
+                    
+                    self.safe_update_result(final_answer + f"\n\n⏱️ Completed in {total_time:.1f}s")
+                    print(f"✅ Multi-query completed in {total_time:.1f}s")
+                    return
                 
-                result = ask_mode_agent(
-                    query=query,
-                    clipboard_text=clipboard_text,
-                    progress_callback=show_progress,
-                    max_iterations=15
-                )
+                # ═══════════════════════════════════════════════════════════
+                # STEP 2B: WEB_SEARCH - Search web and synthesize
+                # ═══════════════════════════════════════════════════════════
+                elif route == "WEB_SEARCH":
+                    self.safe_update_result("🔍 Searching web...")
+                    logger.log_tool_execution("web_search", {"query": query})
+                    
+                    search_start = time.time()
+                    search_results = self.web_search.search(query, include_news=True)
+                    search_time = time.time() - search_start
+                    logger.log_timing("web_search", search_time)
+                    
+                    source_count = search_results['sources_count']
+                    
+                    if source_count > 0:
+                        # Synthesize with appropriate Ollama model
+                        # 1-2 sources: 7B (balanced)
+                        # 3+ sources: 14B (smart)
+                        mode = "balanced" if source_count <= 2 else "smart"
+                        model_name = "qwen2.5:7b" if mode == "balanced" else "qwen2.5:14b"
+                        
+                        self.safe_update_result(f"✅ Found {source_count} sources | 🤖 Generating answer...")
+                        logger.log_tool_execution("synthesize_ollama", {
+                            "mode": mode,
+                            "source_count": source_count
+                        })
+                        logger.log_model_used(model_name, mode)
+                        
+                        synth_start = time.time()
+                        answer = self.brain.synthesize_web_results(query, search_results)
+                        synth_time = time.time() - synth_start
+                        logger.log_timing("synthesis", synth_time)
+                        
+                        total_time = time.time() - start_time
+                        logger.log_response(answer, source_count)
+                        logger.log_timing("total", total_time)
+                        
+                        self.safe_update_result(answer + f"\n\n⏱️ Completed in {total_time:.1f}s")
+                        print(f"✅ Web search completed in {total_time:.1f}s (sources: {source_count})")
+                    else:
+                        # No web results, fallback to Ollama
+                        self.safe_update_result("⚠️ No web sources found | 🤖 Using AI knowledge...")
+                        logger.log_event("WEB_SEARCH_FAILED", {"fallback": "ollama_direct"})
+                        logger.log_model_used("qwen2.5:7b", "balanced")
+                        
+                        answer = self.brain.ask(query, mode="balanced", max_tokens=500)
+                        
+                        total_time = time.time() - start_time
+                        logger.log_response(answer, 0)
+                        logger.log_timing("total", total_time)
+                        
+                        self.safe_update_result(answer + f"\n\n⏱️ Completed in {total_time:.1f}s")
+                    return
                 
-                print(f"✅ Ask Agent: Response complete ({len(result)} chars)")
-                
-                # Display result
-                self.safe_update_result(result)
+                # ═══════════════════════════════════════════════════════════
+                # STEP 2C: OLLAMA_ONLY - Estimate complexity and answer
+                # ═══════════════════════════════════════════════════════════
+                elif route == "OLLAMA_ONLY":
+                    self.safe_update_result("💭 Analyzing complexity...")
+                    logger.log_tool_execution("estimate_complexity", {"query": query})
+                    
+                    complexity_start = time.time()
+                    complexity = self.brain.estimate_complexity(query)
+                    complexity_time = time.time() - complexity_start
+                    logger.log_timing("complexity_check", complexity_time)
+                    logger.log_event("COMPLEXITY", {"level": complexity})
+                    
+                    # SIMPLE: Use 7B (balanced)
+                    # COMPLEX: Use 14B (smart)
+                    if complexity == "SIMPLE":
+                        mode = "balanced"
+                        model_name = "qwen2.5:7b"
+                        self.safe_update_result("🤖 Generating answer (simple)...")
+                    else:
+                        mode = "smart"
+                        model_name = "qwen2.5:14b"
+                        self.safe_update_result("🤖 Generating answer (complex)...")
+                    
+                    logger.log_model_used(model_name, mode)
+                    
+                    answer_start = time.time()
+                    answer = self.brain.ask(query, mode=mode, max_tokens=600)
+                    answer_time = time.time() - answer_start
+                    logger.log_timing("answer_generation", answer_time)
+                    
+                    total_time = time.time() - start_time
+                    logger.log_response(answer)
+                    logger.log_timing("total", total_time)
+                    
+                    self.safe_update_result(answer + f"\n\n⏱️ Completed in {total_time:.1f}s")
+                    print(f"✅ Ollama-only ({complexity}) completed in {total_time:.1f}s")
+                    return
                 
             except Exception as e:
-                import traceback
-                error_msg = f"❌ Error: {str(e)}\n\n{traceback.format_exc()}"
-                self.safe_update_result(error_msg)
+                error_msg = str(e)
+                tb = traceback.format_exc()
+                logger.log_error(error_msg, tb)
+                
+                total_time = time.time() - start_time
+                logger.log_timing("total_failed", total_time)
+                
+                friendly_error = f"""❌ Error: {error_msg[:200]}
+
+Something went wrong. Please try again or rephrase your question.
+
+Log file: logs/ask_button/ask_session_*.log"""
+                
+                self.safe_update_result(friendly_error)
+                print(f"❌ Error:\n{tb}")
         
         # Run in background thread so Mac doesn't freeze
         thread = threading.Thread(target=process_in_background)
@@ -1250,7 +1514,7 @@ Use the buttons below for:
         thread.start()
     
     def handleAgentQuery_(self, sender):
-        """Handle AGENT button - Full autonomous mode with all 41 tools (ReAct Agent)"""
+        """Handle AGENT button - Full autonomous mode with all 41 tools"""
         query = str(self.input_text_view.string()).strip()
 
         if not query:
@@ -1264,30 +1528,19 @@ Use the buttons below for:
         self.expand_view_for_content(100)
 
         # Show loading immediately
-        self.result_view.setString_("🤖 Full Agent Mode - ReAct with 41 Tools\n\nInitializing autonomous agent...")
+        self.result_view.setString_("🤖 Autonomous Agent Mode - Using all 41 tools...\n\nAnalyzing your request...")
 
         import threading
 
         def process_in_background():
             try:
-                # Progress callback for agent iterations
-                def show_progress(msg: str):
-                    """Update UI with agent's progress"""
-                    progress_text = f"🤖 Full Agent Mode\n\n{msg}"
-                    self.safe_update_result(progress_text)
+                # Use the autonomous agent directly with execute_autonomous
+                from src.brain.agent_core import execute_autonomous
                 
-                # Use new full agent mode (wrapper for agent_core.execute_autonomous)
-                from src.brain.agent_modes import full_agent_mode
+                self.safe_update_result("🤖 Agent thinking...\n\nUsing: File operations, App control, System monitoring, AI processing, Web search...")
                 
-                print(f"🤖 Full Agent: Processing with all 41 tools...")
-                
-                result = full_agent_mode(
-                    query=query,
-                    progress_callback=show_progress,
-                    max_iterations=10  # More iterations for complex tasks
-                )
-                
-                print(f"✅ Full Agent: Task complete ({len(result)} chars)")
+                # Execute with autonomous agent (uses LangGraph to pick tools)
+                result = execute_autonomous(query, max_retries=2, timeout=90)
                 
                 # Display result
                 self.safe_update_result(result)

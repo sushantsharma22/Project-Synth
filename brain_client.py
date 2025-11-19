@@ -357,6 +357,180 @@ YOUR ANSWER:"""
         
         return final_answer
 
+    def classify_query_ollama(self, query: str) -> str:
+        """
+        Classify query using Ollama 3B fast model (~1 second)
+        
+        Args:
+            query: User query
+            
+        Returns:
+            One of: "WEB_SEARCH", "OLLAMA_ONLY", "MULTI_QUERY"
+        """
+        # FIRST: Check for multi-query patterns (rule-based for accuracy)
+        query_lower = query.lower()
+        
+        # Multi-query indicators: "X and Y" where X and Y are different topics
+        multi_indicators = [
+            ' and ' in query_lower and '?' not in query_lower,  # "weather windsor and immigration news"
+            query.count('?') >= 2,  # Multiple questions
+        ]
+        
+        # Additional pattern checks
+        has_weather_and_other = 'weather' in query_lower and any(word in query_lower for word in ['news', 'immigration', 'visa'])
+        has_what_and_how = 'what' in query_lower and 'how' in query_lower
+        has_tell_and_is = 'tell' in query_lower and 'and is' in query_lower
+        
+        if has_weather_and_other or has_what_and_how or has_tell_and_is:
+            multi_indicators.append(True)
+        
+        # If clear multi-query pattern, return immediately
+        if any(multi_indicators):
+            # Double-check: must have at least 2 distinct topics
+            topics_found = 0
+            topic_keywords = [
+                ['weather', 'temperature', 'forecast'],
+                ['news', 'latest', 'current events'],
+                ['immigration', 'visa', 'pr', 'permanent residence'],
+                ['what is', 'explain', 'define'],
+                ['how to', 'install', 'setup']
+            ]
+            
+            for topic_group in topic_keywords:
+                if any(keyword in query_lower for keyword in topic_group):
+                    topics_found += 1
+            
+            if topics_found >= 2:
+                return "MULTI_QUERY"
+        
+        # SECOND: Use LLM for remaining cases
+        prompt = f"""Classify this query into ONE category. Reply with ONLY the category name in brackets.
+
+Categories:
+[WEB_SEARCH] - Needs current/real-time data (news, weather, "latest", "today", current events)
+[OLLAMA_ONLY] - General knowledge questions that don't need current data
+[MULTI_QUERY] - Multiple different questions in one input
+
+Query: {query}
+
+Classification:"""
+        
+        response = self.ask(prompt, mode="fast", max_tokens=10)
+        
+        # Extract category
+        if "MULTI_QUERY" in response.upper():
+            return "MULTI_QUERY"
+        elif "WEB_SEARCH" in response.upper():
+            return "WEB_SEARCH"
+        else:
+            return "OLLAMA_ONLY"
+    
+    def split_multi_query(self, query: str) -> list:
+        """
+        Split multi-query into separate sub-questions using Ollama 3B
+        
+        Args:
+            query: Multi-part query
+            
+        Returns:
+            List of individual sub-queries
+        """
+        prompt = f"""Split this query into separate individual questions. Output ONLY the questions, one per line.
+
+Query: {query}
+
+Individual questions:"""
+        
+        response = self.ask(prompt, mode="fast", max_tokens=150)
+        
+        # Parse response - split by newlines and filter
+        lines = [line.strip() for line in response.split('\n')]
+        questions = [line for line in lines if line and len(line) > 10 and not line.startswith(('-', '*', '•'))]
+        
+        # Remove numbering if present
+        import re
+        cleaned = []
+        for q in questions:
+            # Remove leading numbers/bullets
+            q = re.sub(r'^[\d\.\)\-\*\•\s]+', '', q).strip()
+            if q:
+                cleaned.append(q)
+        
+        return cleaned if cleaned else [query]
+    
+    def estimate_complexity(self, query: str) -> str:
+        """
+        Estimate query complexity using Ollama 3B
+        
+        Args:
+            query: User query
+            
+        Returns:
+            "SIMPLE" or "COMPLEX"
+        """
+        prompt = f"""Is this query SIMPLE (basic fact, definition) or COMPLEX (requires reasoning, analysis)?
+Reply with ONLY one word: SIMPLE or COMPLEX
+
+Query: {query}
+
+Classification:"""
+        
+        response = self.ask(prompt, mode="fast", max_tokens=5)
+        
+        return "COMPLEX" if "COMPLEX" in response.upper() else "SIMPLE"
+    
+    def synthesize_web_results(self, query: str, search_results: dict) -> str:
+        """
+        Synthesize answer from web search results using appropriate Ollama model
+        
+        Args:
+            query: Original user query
+            search_results: Dict from WebSearchRAG.search() containing 'results' and 'context'
+            
+        Returns:
+            Synthesized answer with sources
+        """
+        source_count = search_results.get('sources_count', 0)
+        
+        # Choose model based on number of sources
+        # 1-2 sources: Use 7B (balanced)
+        # 3+ sources: Use 14B (smart) for complex synthesis
+        mode = "balanced" if source_count <= 2 else "smart"
+        
+        # Build synthesis prompt
+        from datetime import datetime
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
+        prompt = f"""Answer the user's question using ONLY the web search results below.
+
+CURRENT DATE: {current_date}
+
+USER QUESTION: {query}
+
+WEB SEARCH RESULTS ({source_count} sources):
+{search_results.get('context', '')}
+
+INSTRUCTIONS:
+- Answer the question directly and completely
+- Use information from the web search results above
+- Cite key facts when relevant
+- Keep your answer clear and concise (200-400 words)
+- If the results don't fully answer the question, say so
+- Answer in ENGLISH ONLY
+
+ANSWER:"""
+        
+        answer = self.ask(prompt, mode=mode, max_tokens=600)
+        
+        # Append source list
+        sources_text = "\n\n📚 Sources:\n"
+        for i, result in enumerate(search_results.get('results', [])[:5], 1):
+            title = result.title[:80] + "..." if len(result.title) > 80 else result.title
+            sources_text += f"[{i}] {title} - {result.source}\n"
+        
+        return answer + sources_text
+
+
 if __name__ == "__main__":
     print("🧠 Delta Brain Client")
     print("=" * 50)
