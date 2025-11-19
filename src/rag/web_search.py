@@ -83,7 +83,7 @@ class WebSearchRAG:
         """
         results = []
         
-        if not self._tavily_available:
+        if not self._tavily_available or not self._tavily_client:
             print("❌ Tavily unavailable (API key not configured)")
             return results
         

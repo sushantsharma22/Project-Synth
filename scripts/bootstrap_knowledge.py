@@ -18,7 +18,7 @@ sys.path.insert(0, str(project_root))
 from src.rag.local_rag import SynthRAG
 
 
-def load_file_to_rag(rag: SynthRAG, file_path: Path, source_name: str = None):
+def load_file_to_rag(rag: SynthRAG, file_path: Path, source_name: str | None = None):
     """
     Load a single file into RAG
     

@@ -16,9 +16,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Check for LangChain Google GenAI
 try:
-    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore
     HAS_LANGCHAIN_GOOGLE_GENAI = True
 except ImportError:
+    ChatGoogleGenerativeAI = None  # type: ignore
     HAS_LANGCHAIN_GOOGLE_GENAI = False
 
 
@@ -41,6 +42,11 @@ def summarize_text(text: str) -> str:
         # Use preferred model
         from src.brain.tools_gemini import get_preferred_model_names
         _, preferred_model = get_preferred_model_names()
+        
+        if ChatGoogleGenerativeAI is None:
+            # Fallback if import failed
+            from src.brain.tools_gemini import general_chat
+            return general_chat(f"Summarize in clear bullet points:\n\n{text}")
         
         llm = ChatGoogleGenerativeAI(
             model=preferred_model,

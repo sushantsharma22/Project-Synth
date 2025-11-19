@@ -1,432 +1,300 @@
+#!/usr/bin/env python3
 """
-Agent Modes for Synth - ReAct Iterative Agents
-Implements iterative planning and tool execution for Chat, Ask, and Agent modes
+Agent Modes - AI-Powered Tool Selection with Delta (Ollama)
 
-Author: Sushant Sharma
-Date: November 18, 2025
+Uses Delta (qwen2.5:3b) to intelligently decide which tool to use.
+NO hardcoded keywords - pure AI decision making!
+
+Modes:
+- ask_mode_agent: AI-powered tool selection via Delta (Ollama)
+- agent_mode_full: Full autonomous mode with all 49 tools
 """
 
-import os
-from typing import Optional, Callable
-from datetime import datetime
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
-# Check if LangChain is available
-try:
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    from langgraph.prebuilt import create_react_agent
-    from langchain_core.messages import HumanMessage
-    HAS_LANGCHAIN = True
-except ImportError:
-    HAS_LANGCHAIN = False
-    print("⚠️  LangChain not installed. Run: pip install langchain langchain-community")
-
-from src.brain.core_tools import CHAT_TOOLS, ASK_TOOLS, ALL_TOOLS
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# CHAT MODE AGENT - Conversational with Web Search Iteration
-# ═══════════════════════════════════════════════════════════════════════
-
-def chat_mode_agent(
-    query: str,
-    conversation_context: str = "",
-    progress_callback: Optional[Callable[[str], None]] = None,
-    max_iterations: int = 5
-) -> str:
+def ask_mode_agent(query: str, clipboard_text: str | None = None, progress_callback=None):
     """
-    Chat mode with iterative web search and synthesis.
+    ASK MODE AGENT - AI-Powered Tool Selection
     
-    Process:
-    1. Analyze query - identify topics needing research
-    2. Execute web searches for each topic
-    3. Check completeness - search again if needed
-    4. Synthesize all findings into coherent answer
-    5. Cite sources
+    Uses Delta (Ollama qwen2.5:3b) to intelligently decide which tool to use.
+    The AI understands the query and picks the best tool - no hardcoding!
+    
+    Flow:
+    1. User asks question
+    2. Delta AI analyzes query
+    3. Delta decides which tool to use
+    4. Tool executes and returns answer
+    5. Gemini only used as fallback or for final synthesis
     
     Args:
         query: User's question
-        conversation_context: Previous conversation (last 10 messages)
-        progress_callback: Function to show progress updates
-        max_iterations: Maximum tool calls (default 5)
+        clipboard_text: Optional clipboard context
+        progress_callback: Optional function to call with progress updates
         
     Returns:
-        Synthesized answer with sources
+        str: Answer to the query
     """
+    import time
     
-    if not HAS_LANGCHAIN:
-        # Fallback to simple general_chat if LangChain not available
-        from src.brain.tools_gemini import general_chat
-        return general_chat(query)
-    
-    def show_progress(msg: str):
-        """Show progress if callback provided"""
+    def progress(msg):
+        """Helper to send progress updates"""
         if progress_callback:
             progress_callback(msg)
+        print(f"📊 {msg}")
     
     try:
-        # Initialize LLM with Gemini
-        from src.brain.tools_gemini import get_preferred_model_names
-        _, preferred_model = get_preferred_model_names()
+        progress("🤖 AI analyzing query to select best tool...")
         
-        llm = ChatGoogleGenerativeAI(
-            model=preferred_model,
-            google_api_key=os.getenv("GEMINI_API_KEY"),
-            temperature=0.7
+        # STEP 1: Ask Delta (Ollama) which tool to use
+        routing_decision = _ask_delta_for_routing(query, progress)
+        
+        tool_name = routing_decision.get('tool', 'general_chat')
+        params = routing_decision.get('params', {})
+        reasoning = routing_decision.get('reasoning', 'No reasoning provided')
+        
+        progress(f"🎯 Delta decided: {tool_name}")
+        progress(f"💭 Reasoning: {reasoning}")
+        
+        # STEP 2: Execute the tool Delta selected
+        result = _execute_selected_tool(
+            tool_name=tool_name,
+            params=params,
+            original_query=query,
+            clipboard_text=clipboard_text,
+            progress=progress
         )
         
-        # Create ReAct agent with CHAT_TOOLS (web search + general_chat)
-        agent = create_react_agent(llm, CHAT_TOOLS)
-        
-        # Build system prompt for chat mode
-        current_date = datetime.now().strftime("%B %d, %Y")
-        current_time = datetime.now().strftime("%I:%M %p")
-        
-        system_prompt = f"""You are Synth Chat - an intelligent conversational assistant.
-Current date: {current_date} at {current_time}
-
-CONVERSATION CONTEXT:
-{conversation_context if conversation_context else "No previous conversation"}
-
-YOUR CAPABILITIES:
-- Web search for current events, news, facts, recent information
-- General conversation and knowledge synthesis
-
-YOUR APPROACH:
-When user asks about current events or multiple topics:
-1. Break question into separate topics if needed
-2. Use web_search_tavily for EACH topic separately
-3. After each search, evaluate: "Do I have complete information?"
-4. If incomplete or need more details, search again with refined query
-5. Once you have sufficient data, use general_chat to synthesize
-6. Combine all findings into one coherent answer
-7. Always cite sources at the end
-
-CRITICAL RULES:
-- Search for each topic individually (don't try to combine in one search)
-- If question has 3 topics, make 3 separate searches
-- Check results after each search - if insufficient, search again
-- Use specific queries (e.g., "Himachal elections 2025 results" not "elections")
-- Always include sources with URLs at the bottom
-- Keep final answer conversational and comprehensive (300-500 words)
-
-USER QUERY:
-{query}
-
-Think step by step:
-1. Identify topics needing research
-2. Search for each topic
-3. Check if you have complete info
-4. Synthesize final answer with all sources"""
-        
-        # Show planning progress
-        show_progress("💭 Planning approach...")
-        
-        # Invoke agent with streaming to capture intermediate steps
-        iteration_count = 0
-        final_response = None
-        
-        for chunk in agent.stream(
-            {"messages": [HumanMessage(content=system_prompt)]},
-            {"recursion_limit": max_iterations + 10}
-        ):
-            iteration_count += 1
-            
-            # Extract progress from agent's thoughts
-            if "agent" in chunk:
-                agent_msg = chunk["agent"]["messages"][0]
-                
-                # Check if it's a tool call
-                if hasattr(agent_msg, "tool_calls") and agent_msg.tool_calls:
-                    for tool_call in agent_msg.tool_calls:
-                        tool_name = tool_call.get("name", "unknown")
-                        if tool_name == "web_search_tavily":
-                            args = tool_call.get("args", {})
-                            search_query = args.get("query", "")[:50]
-                            show_progress(f"🔍 Searching: {search_query}... ({iteration_count}/{max_iterations})")
-                        elif tool_name == "general_chat":
-                            show_progress(f"🤖 Synthesizing answer... ({iteration_count}/{max_iterations})")
-                
-                # Check for final answer
-                if hasattr(agent_msg, "content") and agent_msg.content:
-                    final_response = agent_msg.content
-            
-            # Check for tools output
-            if "tools" in chunk:
-                tools_msg = chunk["tools"]["messages"][0]
-                if hasattr(tools_msg, "content"):
-                    # Tool executed successfully
-                    show_progress(f"✅ Retrieved data ({iteration_count}/{max_iterations})")
-        
-        show_progress("✅ Complete! Formatting answer...")
-        
-        # Return final response
-        if final_response:
-            # Clean up response (remove any agent artifacts)
-            response = str(final_response)
-            if isinstance(final_response, list):
-                response = "\n".join(str(r) for r in final_response)
-            return response
-        else:
-            return "I encountered an issue processing your request. Please try again."
-            
-    except Exception as e:
-        import traceback
-        error_msg = f"❌ Chat mode error: {str(e)[:200]}"
-        print(f"Chat mode error:\n{traceback.format_exc()}")
-        
-        # Fallback to simple chat
-        try:
-            from src.brain.tools_gemini import general_chat
-            show_progress("⚠️ Fallback to simple mode...")
-            return general_chat(query)
-        except:
-            return error_msg
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# ASK MODE AGENT - Smart Q&A with Enhanced Tools
-# ═══════════════════════════════════════════════════════════════════════
-
-def ask_mode_agent(
-    query: str,
-    clipboard_text: Optional[str] = None,
-    progress_callback: Optional[Callable[[str], None]] = None,
-    max_iterations: int = 5
-) -> str:
-    """
-    Ask mode with web search, clipboard analysis, and text processing.
-    
-    Process:
-    1. Analyze what user is asking
-    2. Check if clipboard context is needed
-    3. Use web search for current info
-    4. Use AI tools for text processing (explain, summarize, etc.)
-    5. Combine findings into final answer
-    
-    Args:
-        query: User's question
-        clipboard_text: Text user copied (if available)
-        progress_callback: Function to show progress
-        max_iterations: Maximum tool calls
-        
-    Returns:
-        Comprehensive answer
-    """
-    
-    if not HAS_LANGCHAIN:
-        # Fallback to simple approach
-        from src.brain.tools_gemini import general_chat
-        enhanced_query = query
-        if clipboard_text:
-            enhanced_query = f"{query}\n\nContext:\n{clipboard_text[:2000]}"
-        return general_chat(enhanced_query)
-    
-    def show_progress(msg: str):
-        if progress_callback:
-            progress_callback(msg)
-    
-    try:
-        # Initialize LLM
-        from src.brain.tools_gemini import get_preferred_model_names
-        _, preferred_model = get_preferred_model_names()
-        
-        llm = ChatGoogleGenerativeAI(
-            model=preferred_model,
-            google_api_key=os.getenv("GEMINI_API_KEY"),
-            temperature=0.7
-        )
-        
-        # Create ReAct agent with ASK_TOOLS (11 tools)
-        agent = create_react_agent(llm, ASK_TOOLS)
-        
-        # Build system prompt
-        current_date = datetime.now().strftime("%B %d, %Y")
-        
-        clipboard_context = ""
-        if clipboard_text:
-            clipboard_context = f"\n\nCLIPBOARD TEXT (User copied this):\n{clipboard_text[:2000]}"
-        
-        system_prompt = f"""You are Synth Assistant - a smart Q&A helper.
-Current date: {current_date}
-
-YOUR TOOLS:
-- web_search_tavily: Search for current facts, news, events
-- get_clipboard: Read what user copied
-- Text AI tools: explain, summarize, paraphrase, analyze
-- general_chat: Synthesize answers
-
-YOUR APPROACH:
-For each query:
-1. Determine what information is needed
-2. If asking about copied text, use get_clipboard first
-3. If needs current info, use web_search_tavily
-4. If explaining/analyzing text, use appropriate AI tool
-5. Check results - if incomplete, use more tools
-6. Synthesize final answer combining all data
-7. Maximum {max_iterations} tool calls
-
-RULES:
-- Be thorough but efficient (don't waste tool calls)
-- Cite sources when using web search
-- For clipboard queries, focus on the user's text
-- Keep answers comprehensive (200-400 words)
-{clipboard_context}
-
-USER QUERY:
-{query}"""
-        
-        show_progress("💭 Analyzing request...")
-        
-        # Invoke agent
-        iteration_count = 0
-        final_response = None
-        
-        for chunk in agent.stream(
-            {"messages": [HumanMessage(content=system_prompt)]},
-            {"recursion_limit": max_iterations + 10}
-        ):
-            iteration_count += 1
-            
-            if "agent" in chunk:
-                agent_msg = chunk["agent"]["messages"][0]
-                
-                if hasattr(agent_msg, "tool_calls") and agent_msg.tool_calls:
-                    for tool_call in agent_msg.tool_calls:
-                        tool_name = tool_call.get("name", "unknown")
-                        show_progress(f"🔧 Using: {tool_name}... ({iteration_count}/{max_iterations})")
-                
-                if hasattr(agent_msg, "content") and agent_msg.content:
-                    final_response = agent_msg.content
-            
-            if "tools" in chunk:
-                show_progress(f"✅ Tool complete ({iteration_count}/{max_iterations})")
-        
-        show_progress("✅ Complete!")
-        
-        if final_response:
-            response = str(final_response)
-            if isinstance(final_response, list):
-                response = "\n".join(str(r) for r in final_response)
-            return response
-        else:
-            return "I couldn't complete your request. Please try rephrasing."
-            
-    except Exception as e:
-        import traceback
-        print(f"Ask mode error:\n{traceback.format_exc()}")
-        
-        # Fallback
-        try:
-            from src.brain.tools_gemini import general_chat
-            show_progress("⚠️ Fallback mode...")
-            enhanced_query = query
-            if clipboard_text:
-                enhanced_query = f"{query}\n\nContext:\n{clipboard_text[:2000]}"
-            return general_chat(enhanced_query)
-        except:
-            return f"❌ Error: {str(e)[:200]}"
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# AGENT MODE - Full Autonomous (Wrapper for agent_core)
-# ═══════════════════════════════════════════════════════════════════════
-
-def full_agent_mode(
-    query: str,
-    progress_callback: Optional[Callable[[str], None]] = None,
-    max_iterations: int = 10
-) -> str:
-    """
-    Full autonomous agent with all 41 tools.
-    
-    This is a wrapper for agent_core.execute_autonomous which already implements
-    the ReAct loop properly with LangGraph.
-    
-    Args:
-        query: User's command/request
-        progress_callback: Function to show progress
-        max_iterations: Maximum iterations (default 10 for complex tasks)
-        
-    Returns:
-        Agent's final response after all tool executions
-    """
-    
-    def show_progress(msg: str):
-        if progress_callback:
-            progress_callback(msg)
-    
-    try:
-        show_progress("🤖 Autonomous agent initializing...")
-        
-        # Use existing agent_core which already has proper ReAct loop
-        from src.brain.agent_core import execute_autonomous
-        
-        result = execute_autonomous(
-            query,
-            max_retries=2,
-            timeout=90
-        )
-        
-        show_progress("✅ Task complete!")
         return result
         
     except Exception as e:
         import traceback
-        print(f"Agent mode error:\n{traceback.format_exc()}")
-        return f"❌ Agent error: {str(e)[:200]}"
+        error_msg = f"❌ Error: {str(e)}\n\n{traceback.format_exc()}"
+        print(error_msg)
+        return f"Error: {str(e)[:200]}\n\nPlease try rephrasing your question."
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# UTILITY FUNCTION - Route to Appropriate Agent
-# ═══════════════════════════════════════════════════════════════════════
-
-def route_to_agent(
-    mode: str,
-    query: str,
-    conversation_context: str = "",
-    clipboard_text: Optional[str] = None,
-    progress_callback: Optional[Callable[[str], None]] = None
-) -> str:
+def _ask_delta_for_routing(query: str, progress_callback):
     """
-    Route query to appropriate agent based on mode.
+    Ask Delta (Ollama) to decide which tool to use.
     
-    Args:
-        mode: "chat", "ask", or "agent"
-        query: User's query
-        conversation_context: Chat history (for chat mode)
-        clipboard_text: Clipboard content (for ask mode)
-        progress_callback: Progress updates
+    This is the AI intelligence layer - no hardcoded keywords!
+    """
+    import requests
+    import json
+    import re
+    
+    tools_guide = """Available Tools:
+
+1. get_weather
+   Use when: User asks about weather, temperature, should take umbrella, rain, forecast
+   Parameters: {"city": "city_name"}
+   Example: "Should I take umbrella?" → get_weather
+
+2. get_stock_price
+   Use when: User asks about stock prices, crypto prices, market data
+   Parameters: {"ticker": "AAPL"}
+   Example: "What's Tesla stock?" → get_stock_price
+
+3. search_wikipedia
+   Use when: User asks "who is", "what is", "tell me about", biography, history
+   Parameters: {"query": "search_term"}
+   Example: "Who was Einstein?" → search_wikipedia
+
+4. get_definition
+   Use when: User asks "define", "meaning of", "what does X mean"
+   Parameters: {"word": "word"}
+   Example: "Define serendipity" → get_definition
+
+5. is_website_down
+   Use when: User asks if website is down, working, online, offline
+   Parameters: {"url": "website.com"}
+   Example: "Is Google down?" → is_website_down
+
+6. search_reddit_opinions
+   Use when: User asks about Reddit opinions, reviews, "best X", recommendations
+   Parameters: {"topic": "query"}
+   Example: "Best laptops Reddit" → search_reddit_opinions
+
+7. web_search
+   Use when: User asks about latest news, current events, recent information
+   Parameters: {"query": "search_query"}
+   Example: "Latest AI news" → web_search
+
+8. general_chat
+   Use when: General questions, conversations, anything else
+   Parameters: {"query": "user_query"}
+   Example: "Explain quantum physics" → general_chat
+"""
+
+    delta_prompt = f"""You are a smart tool router. Analyze the user's query and pick the BEST tool.
+
+{tools_guide}
+
+USER QUERY: "{query}"
+
+Think:
+- What is the user really asking?
+- Which tool is BEST for this?
+- What parameters does it need?
+
+Respond with ONLY valid JSON (no markdown, no code blocks):
+{{"tool": "tool_name", "params": {{"key": "value"}}, "reasoning": "why this tool"}}"""
+
+    try:
+        progress_callback("🧠 Asking Delta AI for decision...")
         
-    Returns:
-        Agent's response
+        response = requests.post(
+            'http://localhost:11434/api/generate',
+            json={
+                'model': 'qwen2.5:3b',  # Fastest model (6s)
+                'prompt': delta_prompt,
+                'stream': False,
+                'options': {
+                    'temperature': 0.1,  # Low temperature for consistent routing
+                    'num_predict': 150
+                }
+            },
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            result_text = response.json().get('response', '').strip()
+            
+            # Extract JSON from response
+            json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            if json_match:
+                try:
+                    result_json = json.loads(json_match.group(0))
+                    return result_json
+                except json.JSONDecodeError:
+                    pass
+        
+        # Fallback if Delta fails
+        progress_callback("⚠️  Delta routing failed, using fallback...")
+        return {
+            'tool': 'general_chat',
+            'params': {'query': query},
+            'reasoning': 'Delta unavailable, using fallback'
+        }
+        
+    except Exception as e:
+        progress_callback(f"⚠️  Delta error: {str(e)[:50]}")
+        return {
+            'tool': 'general_chat',
+            'params': {'query': query},
+            'reasoning': f'Error: {str(e)[:50]}'
+        }
+
+
+def _execute_selected_tool(tool_name: str, params: dict, original_query: str, 
+                           clipboard_text: str | None, progress):
     """
+    Execute the tool that Delta selected.
+    """
+    try:
+        if tool_name == 'get_weather':
+            from src.brain.live_tools import get_weather
+            city = params.get('city', 'London')
+            progress(f"🌤️  Getting weather for {city}...")
+            return get_weather.invoke({"city": city})
+        
+        elif tool_name == 'get_stock_price':
+            from src.brain.live_tools import get_stock_price
+            ticker = params.get('ticker', 'AAPL')
+            progress(f"💰 Fetching price for {ticker}...")
+            return get_stock_price.invoke({"ticker": ticker})
+        
+        elif tool_name == 'search_wikipedia':
+            from src.brain.live_tools import search_wikipedia
+            topic = params.get('query', original_query)
+            progress(f"📚 Searching Wikipedia for {topic[:50]}...")
+            return search_wikipedia.invoke({"query": topic})
+        
+        elif tool_name == 'get_definition':
+            from src.brain.live_tools import get_definition
+            word = params.get('word', 'hello')
+            progress(f"📖 Getting definition for '{word}'...")
+            return get_definition.invoke({"word": word})
+        
+        elif tool_name == 'is_website_down':
+            from src.brain.live_tools import is_website_down
+            url = params.get('url', 'google.com')
+            progress(f"🌐 Checking status of {url}...")
+            return is_website_down.invoke({"url": url})
+        
+        elif tool_name == 'search_reddit_opinions':
+            from src.brain.live_tools import search_reddit_opinions
+            topic = params.get('topic', original_query)
+            progress(f"💬 Searching Reddit for opinions...")
+            return search_reddit_opinions.invoke({"topic": topic})
+        
+        elif tool_name == 'web_search':
+            from src.rag.web_search import WebSearchRAG
+            search_query = params.get('query', original_query)
+            progress(f"🔍 Searching web...")
+            
+            rag = WebSearchRAG()
+            results = rag.search(search_query, include_news=True)
+            
+            if results['sources_count'] > 0:
+                progress(f"✅ Found {results['sources_count']} sources | 🤖 Generating answer...")
+                
+                from src.brain.tools_gemini import general_chat
+                web_prompt = f"""Using these web search results, answer the question:
+
+QUESTION: {original_query}
+
+WEB RESULTS:
+{results['context'][:3000]}
+
+Provide a clear, accurate answer based on the web results above."""
+                
+                return general_chat(web_prompt)
+            else:
+                progress("⚠️  No web results, using AI knowledge...")
+                from src.brain.tools_gemini import general_chat
+                return general_chat(original_query)
+        
+        else:  # general_chat (default fallback)
+            from src.brain.tools_gemini import general_chat
+            
+            # Use clipboard context if available
+            if clipboard_text and len(clipboard_text.strip()) >= 5:
+                progress(f"📋 Using clipboard context ({len(clipboard_text)} chars)")
+                enhanced_query = f"""QUESTION: {original_query}
+
+CLIPBOARD CONTEXT:
+{clipboard_text[:4000]}
+
+Answer the question based on the clipboard context above. Be clear and concise."""
+                return general_chat(enhanced_query)
+            else:
+                progress("🤖 Generating answer...")
+                return general_chat(original_query)
     
-    if mode == "chat":
-        return chat_mode_agent(
-            query=query,
-            conversation_context=conversation_context,
-            progress_callback=progress_callback,
-            max_iterations=5
-        )
-    
-    elif mode == "ask":
-        return ask_mode_agent(
-            query=query,
-            clipboard_text=clipboard_text,
-            progress_callback=progress_callback,
-            max_iterations=5
-        )
-    
-    elif mode == "agent":
-        return full_agent_mode(
-            query=query,
-            progress_callback=progress_callback,
-            max_iterations=10
-        )
-    
-    else:
-        raise ValueError(f"Unknown mode: {mode}. Use 'chat', 'ask', or 'agent'")
+    except Exception as e:
+        import traceback
+        print(f"❌ Tool execution error: {e}\n{traceback.format_exc()}")
+        # Fallback to general_chat
+        from src.brain.tools_gemini import general_chat
+        return general_chat(original_query)
+
+
+def agent_mode_full(query: str, max_retries: int = 2, timeout: int = 90):
+    """
+    AGENT MODE - Full autonomous mode with all 49 tools
+    """
+    try:
+        from src.brain.agent_core import execute_autonomous
+        
+        print(f"🤖 Agent Mode (Full) - Executing with all 49 tools...")
+        result = execute_autonomous(query, max_retries=max_retries, timeout=timeout)
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"❌ Agent Mode Error: {str(e)}\n\n{traceback.format_exc()}"
+        print(error_msg)
+        return f"Agent error: {str(e)[:200]}"
+
+
+__all__ = ['ask_mode_agent', 'agent_mode_full']

@@ -224,8 +224,14 @@ def get_running_apps() -> str:
         Formatted list of app names
     """
     try:
-        from AppKit import NSWorkspace
-        
+        try:
+            from AppKit import NSWorkspace  # type: ignore
+        except Exception:
+            NSWorkspace = None  # type: ignore
+    
+        if NSWorkspace is None:
+            return "⚠️ AppKit not available. Install: pip install pyobjc-framework-Cocoa"
+    
         workspace = NSWorkspace.sharedWorkspace()
         running_apps = workspace.runningApplications()
         

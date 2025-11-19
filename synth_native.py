@@ -1280,12 +1280,12 @@ Your conversation history is preserved. The quota resets in approximately 1 hour
         thread.start()
     
     def handleQuery_(self, sender):
-        """Handle ASK button - Fast intelligent Ollama routing (5-15 seconds)
+        """Handle ASK button - Fast intelligent agent with Live Tools
         
-        NEW IMPLEMENTATION:
-        - Uses ONLY Ollama (zero Gemini API calls)
-        - Intelligent routing: WEB_SEARCH, OLLAMA_ONLY, MULTI_QUERY
-        - Fast: 5-15 seconds for single queries, 20-30s for multi-queries
+        NEW STREAMLINED IMPLEMENTATION:
+        - Uses ask_mode_agent with ASK_TOOLS (12 safe, read-only tools)
+        - Intelligent tool selection based on query keywords
+        - Fast: 1-5 seconds for Live Tools, 5-15s for web search
         - Full logging to logs/ask_button/ask_session_TIMESTAMP.log
         """
         query = str(self.input_text_view.string()).strip()
@@ -1308,7 +1308,9 @@ Your conversation history is preserved. The quota resets in approximately 1 hour
         import traceback
 
         def process_in_background():
-            # Initialize logger
+            # ═══════════════════════════════════════════════════════════
+            # STEP 1: Initialize Logger
+            # ═══════════════════════════════════════════════════════════
             from utils.ask_button_logger import get_logger
             logger = get_logger()
             
@@ -1317,181 +1319,43 @@ Your conversation history is preserved. The quota resets in approximately 1 hour
             
             try:
                 # ═══════════════════════════════════════════════════════════
-                # STEP 1: ROUTE THE QUERY (Ollama 3B fast, ~1 second)
+                # STEP 2: Get Context (clipboard if available)
                 # ═══════════════════════════════════════════════════════════
-                self.safe_update_result("💭 Analyzing query...")
+                clipboard_text = self.get_recent_clipboard_text()
                 
-                route_start = time.time()
-                route = self.brain.classify_query_ollama(query)
-                route_time = time.time() - route_start
-                
-                logger.log_routing(route, f"Ollama 3B classification in {route_time:.2f}s")
-                logger.log_timing("routing", route_time)
-                
-                print(f"🎯 Route: [{route}] ({route_time:.2f}s)")
+                if clipboard_text:
+                    logger.log_event("CLIPBOARD_CONTEXT", {"length": len(clipboard_text)})
+                    self.safe_update_result(f"� Using clipboard ({len(clipboard_text)} chars) | 🤖 Processing...")
                 
                 # ═══════════════════════════════════════════════════════════
-                # STEP 2A: MULTI_QUERY - Split and process each
+                # STEP 3: Execute Agent (replaces all routing logic)
                 # ═══════════════════════════════════════════════════════════
-                if route == "MULTI_QUERY":
-                    self.safe_update_result("🔄 Detected multiple questions. Splitting...")
-                    logger.log_tool_execution("split_multi_query", {"query": query})
-                    
-                    # Split into sub-questions
-                    sub_queries = self.brain.split_multi_query(query)
-                    logger.log_event("MULTI_QUERY_SPLIT", {"count": len(sub_queries), "queries": sub_queries})
-                    
-                    self.safe_update_result(f"🔄 Processing {len(sub_queries)} questions...")
-                    
-                    sub_answers = []
-                    
-                    for i, sub_q in enumerate(sub_queries, 1):
-                        self.safe_update_result(f"🔄 Question {i}/{len(sub_queries)}: {sub_q[:50]}...")
-                        logger.log_event("SUB_QUERY_START", {"index": i, "query": sub_q})
-                        
-                        sub_start = time.time()
-                        
-                        # Search web for each sub-question
-                        logger.log_tool_execution("web_search", {"query": sub_q})
-                        search_results = self.web_search.search(sub_q, include_news=True)
-                        
-                        if search_results['sources_count'] > 0:
-                            # Synthesize with Ollama 7B
-                            logger.log_tool_execution("synthesize_ollama", {
-                                "mode": "balanced",
-                                "source_count": search_results['sources_count']
-                            })
-                            logger.log_model_used("qwen2.5:7b", "balanced")
-                            
-                            sub_answer = self.brain.synthesize_web_results(sub_q, search_results)
-                            sub_answers.append(f"**Q{i}: {sub_q}**\n\n{sub_answer}\n")
-                        else:
-                            # No web results, use Ollama directly
-                            logger.log_model_used("qwen2.5:7b", "balanced")
-                            sub_answer = self.brain.ask(sub_q, mode="balanced", max_tokens=300)
-                            sub_answers.append(f"**Q{i}: {sub_q}**\n\n{sub_answer}\n")
-                        
-                        sub_time = time.time() - sub_start
-                        logger.log_timing(f"sub_query_{i}", sub_time)
-                    
-                    # Combine all sub-answers with Ollama 14B (smart mode)
-                    self.safe_update_result("🤖 Combining answers...")
-                    logger.log_tool_execution("combine_answers", {"mode": "smart"})
-                    logger.log_model_used("qwen2.5:14b", "smart")
-                    
-                    combined_prompt = f"""Combine these answers into one coherent, well-organized response:
-
-Original question: {query}
-
-Answers:
-{''.join(sub_answers)}
-
-Create a unified response that flows naturally. Keep all important information."""
-                    
-                    final_answer = self.brain.ask(combined_prompt, mode="smart", max_tokens=800)
-                    
-                    total_time = time.time() - start_time
-                    logger.log_response(final_answer)
-                    logger.log_timing("total", total_time)
-                    
-                    self.safe_update_result(final_answer + f"\n\n⏱️ Completed in {total_time:.1f}s")
-                    print(f"✅ Multi-query completed in {total_time:.1f}s")
-                    return
+                from src.brain.agent_modes import ask_mode_agent
+                
+                response = ask_mode_agent(
+                    query, 
+                    clipboard_text=clipboard_text,
+                    progress_callback=lambda msg: self.safe_update_result(msg)
+                )
                 
                 # ═══════════════════════════════════════════════════════════
-                # STEP 2B: WEB_SEARCH - Search web and synthesize
+                # STEP 4: Log Success
                 # ═══════════════════════════════════════════════════════════
-                elif route == "WEB_SEARCH":
-                    self.safe_update_result("🔍 Searching web...")
-                    logger.log_tool_execution("web_search", {"query": query})
-                    
-                    search_start = time.time()
-                    search_results = self.web_search.search(query, include_news=True)
-                    search_time = time.time() - search_start
-                    logger.log_timing("web_search", search_time)
-                    
-                    source_count = search_results['sources_count']
-                    
-                    if source_count > 0:
-                        # Synthesize with appropriate Ollama model
-                        # 1-2 sources: 7B (balanced)
-                        # 3+ sources: 14B (smart)
-                        mode = "balanced" if source_count <= 2 else "smart"
-                        model_name = "qwen2.5:7b" if mode == "balanced" else "qwen2.5:14b"
-                        
-                        self.safe_update_result(f"✅ Found {source_count} sources | 🤖 Generating answer...")
-                        logger.log_tool_execution("synthesize_ollama", {
-                            "mode": mode,
-                            "source_count": source_count
-                        })
-                        logger.log_model_used(model_name, mode)
-                        
-                        synth_start = time.time()
-                        answer = self.brain.synthesize_web_results(query, search_results)
-                        synth_time = time.time() - synth_start
-                        logger.log_timing("synthesis", synth_time)
-                        
-                        total_time = time.time() - start_time
-                        logger.log_response(answer, source_count)
-                        logger.log_timing("total", total_time)
-                        
-                        self.safe_update_result(answer + f"\n\n⏱️ Completed in {total_time:.1f}s")
-                        print(f"✅ Web search completed in {total_time:.1f}s (sources: {source_count})")
-                    else:
-                        # No web results, fallback to Ollama
-                        self.safe_update_result("⚠️ No web sources found | 🤖 Using AI knowledge...")
-                        logger.log_event("WEB_SEARCH_FAILED", {"fallback": "ollama_direct"})
-                        logger.log_model_used("qwen2.5:7b", "balanced")
-                        
-                        answer = self.brain.ask(query, mode="balanced", max_tokens=500)
-                        
-                        total_time = time.time() - start_time
-                        logger.log_response(answer, 0)
-                        logger.log_timing("total", total_time)
-                        
-                        self.safe_update_result(answer + f"\n\n⏱️ Completed in {total_time:.1f}s")
-                    return
+                total_time = time.time() - start_time
+                
+                logger.log_response(response)
+                logger.log_timing("total", total_time)
                 
                 # ═══════════════════════════════════════════════════════════
-                # STEP 2C: OLLAMA_ONLY - Estimate complexity and answer
+                # STEP 5: Update UI
                 # ═══════════════════════════════════════════════════════════
-                elif route == "OLLAMA_ONLY":
-                    self.safe_update_result("💭 Analyzing complexity...")
-                    logger.log_tool_execution("estimate_complexity", {"query": query})
-                    
-                    complexity_start = time.time()
-                    complexity = self.brain.estimate_complexity(query)
-                    complexity_time = time.time() - complexity_start
-                    logger.log_timing("complexity_check", complexity_time)
-                    logger.log_event("COMPLEXITY", {"level": complexity})
-                    
-                    # SIMPLE: Use 7B (balanced)
-                    # COMPLEX: Use 14B (smart)
-                    if complexity == "SIMPLE":
-                        mode = "balanced"
-                        model_name = "qwen2.5:7b"
-                        self.safe_update_result("🤖 Generating answer (simple)...")
-                    else:
-                        mode = "smart"
-                        model_name = "qwen2.5:14b"
-                        self.safe_update_result("🤖 Generating answer (complex)...")
-                    
-                    logger.log_model_used(model_name, mode)
-                    
-                    answer_start = time.time()
-                    answer = self.brain.ask(query, mode=mode, max_tokens=600)
-                    answer_time = time.time() - answer_start
-                    logger.log_timing("answer_generation", answer_time)
-                    
-                    total_time = time.time() - start_time
-                    logger.log_response(answer)
-                    logger.log_timing("total", total_time)
-                    
-                    self.safe_update_result(answer + f"\n\n⏱️ Completed in {total_time:.1f}s")
-                    print(f"✅ Ollama-only ({complexity}) completed in {total_time:.1f}s")
-                    return
+                self.safe_update_result(response + f"\n\n⏱️ Completed in {total_time:.1f}s")
+                print(f"✅ Ask mode completed in {total_time:.1f}s")
                 
             except Exception as e:
+                # ═══════════════════════════════════════════════════════════
+                # STEP 6: Error Handling (preserve logging)
+                # ═══════════════════════════════════════════════════════════
                 error_msg = str(e)
                 tb = traceback.format_exc()
                 logger.log_error(error_msg, tb)

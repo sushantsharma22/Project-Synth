@@ -50,9 +50,9 @@ class SynthOrchestrator:
         self.shutdown_event = threading.Event()
         
         # Components
-        self.clipboard_monitor = None
-        self.screen_capture = None
-        self.brain = None
+        self.clipboard_monitor: Optional[ClipboardMonitor] = None
+        self.screen_capture: Optional[ScreenCapture] = None
+        self.brain: Optional[BrainAPIClient] = None
         
         # Statistics
         self.stats = {
@@ -156,8 +156,11 @@ class SynthOrchestrator:
     
     def _start_clipboard_monitoring(self):
         """Start clipboard monitoring in background thread."""
-        self.clipboard_monitor.start()
-        logger.info("📋 Clipboard monitoring started")
+        if self.clipboard_monitor:
+            self.clipboard_monitor.start()
+            logger.info("📋 Clipboard monitoring started")
+        else:
+            logger.warning("Clipboard monitor not initialized")
     
     def _start_screen_monitoring(self):
         """Start periodic screen capture in background thread."""
@@ -221,11 +224,22 @@ class SynthOrchestrator:
         try:
             self.stats['screen_captures'] += 1
             
+            # Ensure screen capture is initialized
+            if not self.screen_capture:
+                logger.warning("Screen capture not initialized")
+                return
+            
             # Capture screen
             screenshot_data = self.screen_capture.capture()
             
             if screenshot_data:
-                logger.info(f"🖥️  Screen captured: {screenshot_data['size_kb']:.1f}KB")
+                # Check if screenshot_data is a dict (as expected) or an Image object
+                if isinstance(screenshot_data, dict):
+                    # It's a dict with size_kb
+                    logger.info(f"🖥️  Screen captured: {screenshot_data.get('size_kb', 0):.1f}KB")
+                else:
+                    # It's an Image object
+                    logger.info(f"🖥️  Screen captured")
                 
                 # Analyze with Brain (future: send screenshot to Brain)
                 # For now, just log it
@@ -235,7 +249,7 @@ class SynthOrchestrator:
             logger.error(f"Error capturing screen: {e}")
             self.stats['errors'] += 1
     
-    def _analyze_and_act(self, clipboard_text: str = None, content_type: str = None, source: str = 'clipboard'):
+    def _analyze_and_act(self, clipboard_text: str | None = None, content_type: str | None = None, source: str = 'clipboard'):
         """
         Analyze content with Brain and execute suggested actions.
         
@@ -247,14 +261,29 @@ class SynthOrchestrator:
         try:
             self.stats['brain_analyses'] += 1
             
+            # Ensure brain is initialized
+            if not self.brain:
+                logger.error("Brain not initialized")
+                return
+            
             # Analyze with Brain
             logger.debug(f"🧠 Analyzing {content_type}...")
             start_time = time.time()
             
+            # Create ContextPackage for Brain
+            from src.senses.trigger_system import ContextPackage
+            
+            context = ContextPackage(
+                clipboard_content=clipboard_text or "",
+                clipboard_metadata={
+                    'content_type': content_type or 'text',
+                    'source': source
+                }
+            )
+            
             response = self.brain.analyze_context(
-                clipboard_text=clipboard_text,
-                context_type=content_type or 'text',
-                model=self.config['brain']['model']
+                context=context,
+                mode='balanced'
             )
             
             analysis_time = (time.time() - start_time) * 1000
@@ -299,7 +328,7 @@ class SynthOrchestrator:
         
         return True
     
-    def _execute_action(self, response, context_data: str = None):
+    def _execute_action(self, response, context_data: str | None = None):
         """
         Execute the suggested action.
         
