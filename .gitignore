@@ -120,6 +120,9 @@ models/
 brain.docx
 ~$*.docx
 
+# Docs: keep local docs folder untracked
+docs/
+
 # Test outputs
 test_output/
 *.test.log
