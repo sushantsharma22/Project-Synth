@@ -40,7 +40,7 @@ def check_ssh_tunnel():
         else:
             print("❌ SSH tunnel is NOT running")
             print("\n💡 Start the tunnel with:")
-            print("   ./brain_monitor_key.sh")
+            print("   ./scripts/connect_brain_key.sh")
             print("   OR")
             print("   ssh -L 11434:localhost:11434 -L 11435:localhost:11435 -L 11436:localhost:11436 sharmas1@delta.cs.uwindsor.ca")
             return False
@@ -211,7 +211,7 @@ def main():
         
         if not tunnel_ok:
             print("1️⃣  Start SSH tunnel:")
-            print("   ./brain_monitor_key.sh")
+            print("   ./scripts/connect_brain_key.sh")
             print()
         
         if tunnel_ok and not working_ports:

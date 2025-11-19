@@ -72,19 +72,33 @@ class ChatManager:
         return context
     
     def get_full_conversation(self) -> str:
-        """Get full formatted conversation for display"""
+        """Get full formatted conversation for display (OPTIMIZED - last 20 messages only)"""
         if not self.messages:
             return "💬 Chat History\n\nNo messages yet. Start a conversation!"
         
-        result = f"💬 Chat History (Session: {self.session_start.strftime('%I:%M %p')})\n"
-        result += "=" * 60 + "\n\n"
+        # Limit to last 20 messages for performance
+        messages_to_show = self.messages[-20:] if len(self.messages) > 20 else self.messages
         
-        for i, msg in enumerate(self.messages, 1):
+        # Use efficient string building with list
+        parts = [f"💬 Chat History (Session: {self.session_start.strftime('%I:%M %p')})"]
+        parts.append("=" * 60)
+        
+        # Add message count if truncated
+        if len(self.messages) > 20:
+            parts.append(f"(Showing last 20 of {len(self.messages)} messages)")
+        
+        parts.append("")  # Blank line
+        
+        # Build message list efficiently
+        for i, msg in enumerate(messages_to_show, 1):
             time_str = msg.timestamp.strftime("%I:%M:%S %p")
             prefix = "👤 You" if msg.role == 'user' else "🤖 Synth"
-            result += f"[{time_str}] {prefix}:\n{msg.content}\n\n"
+            parts.append(f"[{time_str}] {prefix}:")
+            parts.append(msg.content)
+            parts.append("")  # Blank line between messages
         
-        return result
+        # Join once at the end (much faster than repeated concatenation)
+        return '\n'.join(parts)
     
     def clear(self):
         """Clear conversation history"""

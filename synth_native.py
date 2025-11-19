@@ -354,10 +354,13 @@ class SynthMenuBarNative(NSObject):
         self.chat_manager = ChatManager(max_history=50)
         print("💬 Chat manager initialized")
         
+        # Chat Mode State
+        self.chat_mode_active = False
+        
         # UI sizing + layout guard rails
         self.default_width = 500
         self.default_result_height = 195
-        self.max_result_height = 600  # Increased from 240 to allow scrolling for long content
+        self.max_result_height = 700  # Increased to 700px for longer conversations
         self.compact_height = 160  # Increased to fit 6 buttons (2 rows)
         self.current_result_height = self.default_result_height
         self.menu_open = False
@@ -413,22 +416,35 @@ class SynthMenuBarNative(NSObject):
         scroll_view.setDrawsBackground_(True)
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setHasHorizontalScroller_(False)
-        scroll_view.setAutohidesScrollers_(True)
+        scroll_view.setAutohidesScrollers_(False)  # ALWAYS show scrollbar
+        scroll_view.setScrollerStyle_(1)  # Overlay style, always visible
+        scroll_view.setVerticalScrollElasticity_(1)  # Allow bounce at top/bottom
         scroll_view.setAutoresizingMask_(2)
 
         # Result text view - READ-ONLY, scrollable
         self.result_view = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, inner_width - 20, result_view_height))
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
-        self.result_view.setRichText_(False)
-        self.result_view.setFont_(NSFont.systemFontOfSize_(13))
+        self.result_view.setRichText_(False)  # Disable rich text for performance
+        self.result_view.setFont_(NSFont.fontWithName_size_("Menlo", 12))  # Fixed-width font for speed
         self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.95))
         self.result_view.setTextColor_(NSColor.whiteColor())
         self.result_view.setAllowsUndo_(False)
+        
+        # Performance optimizations
+        try:
+            self.result_view.setUsesLigatures_(False)  # Disable ligatures for performance
+            self.result_view.setUsesFontPanel_(False)  # Disable font panel
+            self.result_view.setImportsGraphics_(False)  # Disable graphics import
+        except:
+            pass
+        
         try:
             self.result_view.setAutomaticTextReplacementEnabled_(False)
             self.result_view.setAutomaticQuoteSubstitutionEnabled_(False)
             self.result_view.setAutomaticDashSubstitutionEnabled_(False)
+            self.result_view.setAutomaticSpellingCorrectionEnabled_(False)
+            self.result_view.setGrammarCheckingEnabled_(False)
             self.result_view.setAutomaticSpellingCorrectionEnabled_(False)
         except:
             pass
@@ -442,16 +458,12 @@ class SynthMenuBarNative(NSObject):
         scroll_view.setDocumentView_(self.result_view)
         self.scroll_view = scroll_view
 
-        # ============ INPUT TEXT VIEW (MIDDLE) - Editable, scrollable, with cursor! ============
-        input_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(padding, 60, inner_width, 50))
-        input_scroll.setBorderType_(1)  # Line border
-        input_scroll.setDrawsBackground_(True)
-        input_scroll.setHasVerticalScroller_(True)
-        input_scroll.setHasHorizontalScroller_(False)
-        input_scroll.setAutohidesScrollers_(True)
+        # ============ INPUT TEXT VIEW (MIDDLE) - Editable, direct view (NO scroll wrapper) ============
+        # CRITICAL FIX: Input view should NOT be wrapped in NSScrollView
+        # NSScrollView blocks focus and keyboard events for input fields
+        # Create InputTextView DIRECTLY with proper frame
         
-        # INPUT TEXT VIEW - This is the key fix! NSTextView instead of NSTextField
-        self.input_text_view = InputTextView.alloc().initWithFrame_(NSMakeRect(0, 0, inner_width - 20, 50))
+        self.input_text_view = InputTextView.alloc().initWithFrame_(NSMakeRect(padding, 60, inner_width, 40))
         self.input_text_view.setEditable_(True)
         self.input_text_view.setSelectable_(True)
         self.input_text_view.setRichText_(False)
@@ -459,15 +471,26 @@ class SynthMenuBarNative(NSObject):
         self.input_text_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.16, 0.18, 0.98))
         self.input_text_view.setTextColor_(NSColor.whiteColor())
         self.input_text_view.setInsertionPointColor_(NSColor.whiteColor())  # White cursor!
+        
+        # Border styling
+        self.input_text_view.setWantsLayer_(True)
+        try:
+            self.input_text_view.layer().setBorderWidth_(1.0)
+            self.input_text_view.layer().setBorderColor_(NSColor.colorWithRed_green_blue_alpha_(0.3, 0.3, 0.35, 1.0).CGColor())
+            self.input_text_view.layer().setCornerRadius_(4.0)
+        except:
+            pass
+        
         try:
             self.input_text_view.setAutomaticTextReplacementEnabled_(False)
             self.input_text_view.setAutomaticQuoteSubstitutionEnabled_(False)
         except:
             pass
+        
         try:
             # Word wrap for input
             self.input_text_view.textContainer().setWidthTracksTextView_(True)
-            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(inner_width - 20, 10000000))
+            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(inner_width, 10000000))
             self.input_text_view.textContainer().setLineFragmentPadding_(8.0)
         except:
             pass
@@ -477,9 +500,6 @@ class SynthMenuBarNative(NSObject):
         
         # Set callback for Enter key
         self.input_text_view.on_enter_callback = self.handleInputEnter
-        
-        input_scroll.setDocumentView_(self.input_text_view)
-        self.input_scroll = input_scroll
 
         # ============ 5 BUTTONS (ROW 1) ============
         btn_spacing = 6
@@ -530,15 +550,15 @@ class SynthMenuBarNative(NSObject):
         # ============ BUTTON 6 (ROW 2) - CHAT ============
         chat_btn_y = 6
         self.chat_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding, chat_btn_y, inner_width, 22))
-        self.chat_button.setTitle_("💬 Chat (with context memory)")
+        self.chat_button.setTitle_("💬 Chat")
         self.chat_button.setBezelStyle_(4)
         self.chat_button.setTarget_(self)
-        self.chat_button.setAction_("handleChat:")
+        self.chat_button.setAction_("toggleChatMode:")  # FIXED: Toggle mode, not send message
         self.chat_button.setFont_(NSFont.systemFontOfSize_(11))
         
         # Add all views
         self.input_view.addSubview_(scroll_view)
-        self.input_view.addSubview_(input_scroll)
+        self.input_view.addSubview_(self.input_text_view)  # Direct view, no scroll wrapper!
         self.input_view.addSubview_(self.ask_button)
         self.input_view.addSubview_(self.agent_button)
         self.input_view.addSubview_(self.screen_button)
@@ -696,8 +716,14 @@ The plugin will automatically activate when relevant to your query."""
         # Clear chat history
         self.chat_manager.clear()
         
-        print("🔄 Cleared: Clipboard, Results, and Chat History")
-        self.reset_to_compact_view()
+        # Show appropriate message based on mode
+        if self.chat_mode_active:
+            self.safe_update_result("💬 Chat Mode Active\n\nConversation cleared. Start a new conversation...")
+            self.scroll_view.setHidden_(False)
+            self.expand_view_for_content(100)
+        else:
+            print("🔄 Cleared: Clipboard, Results, and Chat History")
+            self.reset_to_compact_view()
         
         # Focus back on input so user can type immediately
         self.prepare_prompt_entry()
@@ -927,8 +953,97 @@ The plugin will automatically activate when relevant to your query."""
                 pass
     
     def handleInputEnter(self):
-        """Handle Enter key in input text view - triggers Ask button"""
-        self.handleQuery_(None)
+        """Handle Enter key in input text view - routes based on chat mode"""
+        if self.chat_mode_active:
+            # In chat mode: Enter sends message
+            self.handleChat_(None)
+        else:
+            # Normal mode: Enter triggers Ask button
+            self.handleQuery_(None)
+    
+    
+    def toggleChatMode_(self, sender):
+        """Toggle Chat Mode ON/OFF - COMPLETE IMPLEMENTATION"""
+        self.chat_mode_active = not self.chat_mode_active
+        
+        if self.chat_mode_active:
+            # ═══════ ACTIVATE CHAT MODE ═══════
+            # Change button text
+            self.chat_button.setTitle_("💬 Chat Mode (ON)")
+            
+            # Disable other buttons (Ask/Agent/Screen)
+            self.ask_button.setEnabled_(False)
+            self.agent_button.setEnabled_(False)
+            self.screen_button.setEnabled_(False)
+            
+            # Change background to darker blue tint (chat mode indicator)
+            chat_bg_color = NSColor.colorWithRed_green_blue_alpha_(0.15, 0.18, 0.25, 0.98)
+            chat_result_bg = NSColor.colorWithRed_green_blue_alpha_(0.15, 0.18, 0.25, 0.95)
+            
+            self.input_text_view.setBackgroundColor_(chat_bg_color)
+            self.result_view.setBackgroundColor_(chat_result_bg)
+            
+            # Show chat mode message with clear instructions
+            welcome_msg = """💬 Chat Mode Active
+
+Ask me anything! I'll remember our conversation.
+
+✨ Features:
+• 🔍 Automatic web search for current events & news
+• 💭 Conversation memory (last 10 messages for context)
+• 📚 Sources cited when using web search
+• ⚡ Press Enter to send messages
+
+📝 Tips:
+• Ask follow-up questions - I remember what we discussed
+• Request latest news/polls/updates for automatic web search
+• Click 'Chat Mode (ON)' button to exit chat mode
+
+Ready to chat! What would you like to know?"""
+            
+            self.safe_update_result(welcome_msg)
+            self.scroll_view.setHidden_(False)
+            self.expand_view_for_content(250)
+            
+            print("✅ Chat Mode ACTIVATED - Web search enabled, conversation memory active")
+            
+        else:
+            # ═══════ DEACTIVATE CHAT MODE ═══════
+            # Restore button text
+            self.chat_button.setTitle_("💬 Chat")
+            
+            # Re-enable other buttons
+            self.ask_button.setEnabled_(True)
+            self.agent_button.setEnabled_(True)
+            self.screen_button.setEnabled_(True)
+            
+            # Restore original background colors
+            normal_input_bg = NSColor.colorWithRed_green_blue_alpha_(0.15, 0.16, 0.18, 0.98)
+            normal_result_bg = NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.95)
+            
+            self.input_text_view.setBackgroundColor_(normal_input_bg)
+            self.result_view.setBackgroundColor_(normal_result_bg)
+            
+            # Show exit message
+            exit_msg = """✅ Exited Chat Mode
+
+Returned to normal mode.
+
+💾 Your chat history is preserved until you click Clear.
+
+Use the buttons below for:
+• Ask - Simple Q&A
+• Agent - Autonomous actions
+• Screen - Screen analysis"""
+            
+            self.safe_update_result(exit_msg)
+            self.scroll_view.setHidden_(False)
+            self.expand_view_for_content(150)
+            
+            print("❌ Chat Mode DEACTIVATED - Returned to normal mode")
+        
+        # Focus input field
+        self.prepare_prompt_entry()
     
     def handleScreen_(self, sender):
         """Handle Screen button"""
@@ -942,7 +1057,7 @@ The plugin will automatically activate when relevant to your query."""
             self.analyze_screen_with_query(query)
     
     def handleChat_(self, sender):
-        """Handle CHAT button - Conversational AI with context memory"""
+        """Handle CHAT in chat mode - ReAct Agent with Iterative Web Search"""
         query = str(self.input_text_view.string()).strip()
         
         if not query:
@@ -953,7 +1068,7 @@ The plugin will automatically activate when relevant to your query."""
             self.expand_view_for_content(300)
             return
         
-        # Clear input
+        # Clear input immediately
         self.input_text_view.setString_("")
         
         # Show result area
@@ -961,47 +1076,113 @@ The plugin will automatically activate when relevant to your query."""
         self.expand_view_for_content(100)
         
         # Add user message to history
+        from datetime import datetime
         self.chat_manager.add_message('user', query)
         
-        # Show loading
-        self.result_view.setString_("💬 Chat mode - thinking with full context...")
+        # Show immediate progress
+        current_time = datetime.now().strftime("%I:%M:%S %p")
+        loading_msg = f"💬 Chat Mode - ReAct Agent\n\n[{current_time}] 👤 You:\n{query}\n\n"
+        self.safe_update_result(loading_msg + "💭 Initializing agent...")
         
         import threading
         
         def process_chat():
             try:
-                # Get conversation context (last 10 messages)
-                context = self.chat_manager.get_context(last_n=10)
-                
-                # Build prompt with context
                 from datetime import datetime
-                current_time = datetime.now().strftime("%I:%M %p")
                 
-                prompt = f"""You are Synth, a helpful AI assistant. Current time: {current_time}
-
-{context}
-
-👤 User:
-{query}
-
-🤖 Assistant:
-Respond naturally and conversationally. Remember the context from earlier messages."""
+                # Progress callback for agent iterations
+                def show_progress(msg: str):
+                    """Update UI with agent's progress"""
+                    progress_text = loading_msg + msg
+                    self.safe_update_result(progress_text)
                 
-                # Use general_chat for conversational response
-                from src.brain.tools_gemini import general_chat
-                response = general_chat(prompt)
+                # Get conversation context for agent
+                conversation_context = self.chat_manager.get_context(last_n=10)
+                
+                # Use new ReAct agent for chat mode
+                from src.brain.agent_modes import chat_mode_agent
+                
+                print(f"🤖 Chat Agent: Processing query with iterative web search...")
+                
+                response = chat_mode_agent(
+                    query=query,
+                    conversation_context=conversation_context,
+                    progress_callback=show_progress,
+                    max_iterations=15
+                )
+                
+                # Clean up response (remove any agent artifacts)
+                response = response.strip()
+                if response.startswith("🤖"):
+                    response = response[1:].strip()
+                
+                print(f"✅ Chat Agent: Response complete ({len(response)} chars)")
                 
                 # Add assistant response to history
                 self.chat_manager.add_message('assistant', response)
                 
-                # Show full conversation
-                full_chat = self.chat_manager.get_full_conversation()
-                self.safe_update_result(full_chat)
+                # Build full conversation display (OPTIMIZED - last 20 messages only)
+                conversation_display = "💬 Chat Mode - ReAct Agent\n\n"
+                
+                # Get messages (limit to last 20 for performance)
+                messages_to_show = self.chat_manager.messages[-20:] if len(self.chat_manager.messages) > 20 else self.chat_manager.messages
+                
+                if len(self.chat_manager.messages) > 20:
+                    conversation_display += f"(Showing last 20 of {len(self.chat_manager.messages)} messages)\n\n"
+                
+                # Show messages with timestamps (efficient string building)
+                message_parts = []
+                for msg in messages_to_show:
+                    time_str = msg.timestamp.strftime("%I:%M:%S %p")
+                    if msg.role == 'user':
+                        message_parts.append(f"[{time_str}] 👤 You:\n{msg.content}\n\n")
+                    else:
+                        message_parts.append(f"[{time_str}] 🤖 Synth:\n{msg.content}\n\n")
+                
+                conversation_display += ''.join(message_parts)
+                
+                # Display full conversation (with size limit for performance)
+                if len(conversation_display) > 50000:  # 50KB limit
+                    conversation_display = conversation_display[-50000:]
+                    conversation_display = "...(conversation truncated)\n\n" + conversation_display
+                
+                self.safe_update_result(conversation_display)
+                
+                # CRITICAL: Auto-scroll to bottom in chat mode
+                # Use small delay to ensure text is rendered first
+                import time as time_module2
+                time_module2.sleep(0.1)
+                
+                # Force scroll to bottom - show latest message
+                try:
+                    self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        "forceScrollToBottom:", None, False
+                    )
+                except:
+                    pass
+                
+                # Second scroll attempt after another delay for reliability
+                time_module2.sleep(0.1)
+                try:
+                    self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        "forceScrollToBottom:", None, False
+                    )
+                except:
+                    pass
                 
             except Exception as e:
                 import traceback
-                error_msg = f"❌ Chat Error: {str(e)}\n\n{traceback.format_exc()}"
+                error_msg = f"❌ Chat Agent Error: {str(e)[:200]}\n\nPlease try again. Your conversation history is preserved."
+                
+                # Keep conversation visible above error
+                try:
+                    current_conversation = self.chat_manager.get_full_conversation()
+                    error_msg = current_conversation + "\n\n" + error_msg
+                except:
+                    pass
+                
                 self.safe_update_result(error_msg)
+                print(f"❌ Full error:\n{traceback.format_exc()}")
         
         # Run in background
         thread = threading.Thread(target=process_chat)
@@ -1009,7 +1190,7 @@ Respond naturally and conversationally. Remember the context from earlier messag
         thread.start()
     
     def handleQuery_(self, sender):
-        """Handle ASK button - Simple Q&A with decision router"""
+        """Handle ASK button - ReAct Agent with Smart Q&A"""
         query = str(self.input_text_view.string()).strip()
 
         if not query:
@@ -1023,137 +1204,37 @@ Respond naturally and conversationally. Remember the context from earlier messag
         self.expand_view_for_content(100)
 
         # Show loading immediately
-        self.result_view.setString_("🤖 Autonomous agent thinking...")
+        self.result_view.setString_("💭 Ask Mode - ReAct Agent\n\nAnalyzing your request...")
 
-        import threading, re
+        import threading
 
         def process_in_background():
             try:
-                # Check if this is explain/paraphrase and we have captured clipboard
-                query_lower = query.lower()
-                clipboard_commands = {'explain', 'paraphrase', 'rephrase', 'rewrite', 'summarize', 'show', 'what did i copy'}
-
-                if any(cmd in query_lower for cmd in clipboard_commands):
-                    clipboard_text = self.get_recent_clipboard_text()
-                    if clipboard_text:
-                        print(f"🎯 Using captured clipboard for '{query}': {len(clipboard_text)} chars")
-
-                        # Show clipboard - just echo it back
-                        if any(word in query_lower for word in ['show', 'what did i copy', 'clipboard']):
-                            result = f"📋 You copied:\n\n{clipboard_text}"
-                            self.safe_update_result(result)
-                            return
-
-                        # Determine target term (like 'qiskit') for focused explanation
-                        def extract_target_sentence(clip_text, token):
-                            sents = re.split(r'(?<=[\.\?!])\s+', clip_text)
-                            for s in sents:
-                                if token.lower() in s.lower():
-                                    return s.strip()
-                            return None
-
-                        target_term = None
-                        m = re.search(r'explain\s+([A-Za-z0-9_\-+.]+)', query_lower)
-                        if m:
-                            target_term = m.group(1)
-                        else:
-                            tokens = [re.sub(r'["(),.]', '', t) for t in re.split(r"\s+", query_lower) if len(t) > 2]
-                            for t in tokens:
-                                if t in clipboard_text.lower():
-                                    target_term = t
-                                    break
-
-                        if target_term:
-                            extracted = extract_target_sentence(clipboard_text, target_term)
-                            if extracted:
-                                selected_for_explain = extracted
-                            else:
-                                selected_for_explain = clipboard_text
-                        else:
-                            selected_for_explain = clipboard_text
-
-                        # Use Decision Router to pick the tool
-                        from src.brain.decision_router import decide_tool
-                        decision = decide_tool(query, selected_for_explain if selected_for_explain else None)
-                        # DEBUG: Decision router returned
-                        action = decision.get('action')
-
-                        pass
-                        if action == 'local':
-                            # Use simplified agent for local actions
-                            from src.brain.agent_simple import execute_autonomous as simple_execute
-                            result = simple_execute(query)
-                            print(f"Model used: LOCAL_AGENT")
-                            self.safe_update_result(result)
-                            return
-
-                        if action == 'web':
-                            # Use callable web search function from tools_gemini (plain function)
-                            result = web_search_tavily(query)
-                            print(f"Model used: WebSearch (Tavily)")
-                            self.safe_update_result(result)
-                            return
-
-                        if action == 'llm':
-                            # Decide which LLM tool to call
-                            tool_key = decision.get('tool')
-                            pass
-                            if tool_key == 'llm_explain' and selected_for_explain:
-                                from src.brain.tools_gemini import explain_text
-                                pass
-                                from src.brain.tools_gemini import LAST_USED_MODEL
-                                # If we found a target term like 'Qiskit' or 'BAKE', pass it so the model focuses on
-                                # that term within the provided sentence/clip instead of summarizing the entire paragraph.
-                                explanation = explain_text(selected_for_explain, focus_term=target_term)
-                                pass
-                                print(f"Model used: {LAST_USED_MODEL}")
-                                # Do NOT display the model name in the UI; only log it for debugging
-                                self.safe_update_result(explanation)
-                                pass
-                                return
-                            if tool_key == 'llm_paraphrase' and selected_for_explain:
-                                from src.brain.tools_gemini import paraphrase_text
-                                from src.brain.tools_gemini import LAST_USED_MODEL
-                                paraphrased = paraphrase_text(selected_for_explain)
-                                print(f"Model used: {LAST_USED_MODEL}")
-                                self.safe_update_result(paraphrased)
-                                return
-                            # Default to general chat
-                            from src.brain.tools_gemini import general_chat
-                            from src.brain.tools_gemini import LAST_USED_MODEL
-                            result = general_chat(query)
-                            print(f"Model used: {LAST_USED_MODEL}")
-                            self.safe_update_result(result)
-                            return
-                        
-                        # Paraphrase/rewrite
-                        elif any(word in query_lower for word in ['paraphrase', 'rephrase', 'rewrite']):
-                            from src.brain.tools_gemini import paraphrase_text
-                            result = paraphrase_text(selected_for_explain)
-                            self.safe_update_result(result)
-                            return
-                        
-                        # Summarize
-                        elif 'summarize' in query_lower:
-                            # Use Gemini for summary
-                            from src.brain.tools_gemini import general_chat
-                            summary_prompt = f"Summarize this in 2-3 sentences:\n\n{clipboard_text}"
-                            result = general_chat(summary_prompt)
-                            self.safe_update_result(result)
-                            return
-                        
-                        else:
-                            # Let agent handle it
-                            result = self.brain.execute_command(query)
-                            self.safe_update_result(result)
-                            return
-                    else:
-                        # No clipboard - guide user
-                        self.safe_update_result("📋 Please copy some text with Cmd+C first, then ask me to explain/paraphrase it.")
-                        return
+                # Progress callback for agent iterations
+                def show_progress(msg: str):
+                    """Update UI with agent's progress"""
+                    progress_text = f"💭 Ask Mode - ReAct Agent\n\n{msg}"
+                    self.safe_update_result(progress_text)
                 
-                # AUTONOMOUS AGENT - decides which tools to use
-                result = self.brain.execute_command(query)
+                # Get clipboard text if available
+                clipboard_text = self.get_recent_clipboard_text()
+                
+                if clipboard_text:
+                    print(f"📋 Ask Agent: Using clipboard context ({len(clipboard_text)} chars)")
+                
+                # Use new ReAct agent for ask mode
+                from src.brain.agent_modes import ask_mode_agent
+                
+                print(f"🤖 Ask Agent: Processing query with smart tool selection...")
+                
+                result = ask_mode_agent(
+                    query=query,
+                    clipboard_text=clipboard_text,
+                    progress_callback=show_progress,
+                    max_iterations=15
+                )
+                
+                print(f"✅ Ask Agent: Response complete ({len(result)} chars)")
                 
                 # Display result
                 self.safe_update_result(result)
@@ -1169,7 +1250,7 @@ Respond naturally and conversationally. Remember the context from earlier messag
         thread.start()
     
     def handleAgentQuery_(self, sender):
-        """Handle AGENT button - Full autonomous mode with all 41 tools"""
+        """Handle AGENT button - Full autonomous mode with all 41 tools (ReAct Agent)"""
         query = str(self.input_text_view.string()).strip()
 
         if not query:
@@ -1183,19 +1264,30 @@ Respond naturally and conversationally. Remember the context from earlier messag
         self.expand_view_for_content(100)
 
         # Show loading immediately
-        self.result_view.setString_("🤖 Autonomous Agent Mode - Using all 41 tools...\n\nAnalyzing your request...")
+        self.result_view.setString_("🤖 Full Agent Mode - ReAct with 41 Tools\n\nInitializing autonomous agent...")
 
         import threading
 
         def process_in_background():
             try:
-                # Use the autonomous agent directly with execute_autonomous
-                from src.brain.agent_core import execute_autonomous
+                # Progress callback for agent iterations
+                def show_progress(msg: str):
+                    """Update UI with agent's progress"""
+                    progress_text = f"🤖 Full Agent Mode\n\n{msg}"
+                    self.safe_update_result(progress_text)
                 
-                self.safe_update_result("🤖 Agent thinking...\n\nUsing: File operations, App control, System monitoring, AI processing, Web search...")
+                # Use new full agent mode (wrapper for agent_core.execute_autonomous)
+                from src.brain.agent_modes import full_agent_mode
                 
-                # Execute with autonomous agent (uses LangGraph to pick tools)
-                result = execute_autonomous(query, max_retries=2, timeout=90)
+                print(f"🤖 Full Agent: Processing with all 41 tools...")
+                
+                result = full_agent_mode(
+                    query=query,
+                    progress_callback=show_progress,
+                    max_iterations=10  # More iterations for complex tasks
+                )
+                
+                print(f"✅ Full Agent: Task complete ({len(result)} chars)")
                 
                 # Display result
                 self.safe_update_result(result)
@@ -1633,11 +1725,59 @@ ANSWER:"""
         """Update result view on the main thread (selector method - note the trailing underscore)."""
         try:
             self.result_view.setString_(text)
+            
+            # Force layout update BEFORE scrolling
+            self.result_view.setNeedsDisplay_(True)
+            
             # Calculate height based on text length (optimized for longer content)
             line_count = text.count('\n') + 1
-            # Allow more room for longer text, max 600px for scrolling
-            text_height = max(80, min(600, line_count * 18 + 40))
+            # Allow more room for longer text, max 700px for scrolling
+            text_height = max(80, min(700, line_count * 18 + 40))
             self.expand_view_for_content(text_height)
+            
+            # Small delay to allow text to render, then scroll
+            import time
+            time.sleep(0.05)
+            
+            # FORCE scroll to bottom after text update - FIXED MATH!
+            text_length = len(str(self.result_view.string()))
+            if text_length > 0:
+                # Scroll to LAST character (text_length, 0) not (text_length - 1, 0)!
+                self.result_view.scrollRangeToVisible_((text_length, 0))
+                
+                # Flash scrollbar to make it visible
+                try:
+                    self.scroll_view.flashScrollers()
+                except:
+                    pass
+        except Exception:
+            pass
+    
+    def scrollToBottom_(self, _):
+        """Scroll result view to bottom (for chat mode)"""
+        try:
+            # Scroll to the end of the text - FIXED MATH
+            text_length = len(str(self.result_view.string()))
+            if text_length > 0:
+                # Use text_length (last position), NOT text_length - 1!
+                self.result_view.scrollRangeToVisible_((text_length, 0))
+        except Exception:
+            pass
+    
+    def forceScrollToBottom_(self, _):
+        """FORCE scroll to bottom with scrollbar flash"""
+        try:
+            # Get text length
+            text_length = len(str(self.result_view.string()))
+            if text_length > 0:
+                # Scroll to very end - FIXED: Use text_length NOT text_length - 1
+                self.result_view.scrollRangeToVisible_((text_length, 0))
+                
+                # Flash scrollers to make them visible
+                try:
+                    self.scroll_view.flashScrollers()
+                except:
+                    pass
         except Exception:
             pass
     

@@ -50,6 +50,10 @@ check_brain.py
 *_auto.sh
 deprecated/
 
+# Environment variables
+.env
+.env.*
+
 # SSH Keys (Never commit)
 *.pem
 *.key

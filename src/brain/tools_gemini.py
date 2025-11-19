@@ -59,7 +59,7 @@ def generate_with_fallback(contents: str, candidate_models=None, max_retries: in
 
     from collections import deque
     last_exception = None
-    backoff = 1
+    backoff = 2  # Start at 2 seconds (increased from 1)
     # Basic free-tier RPM defaults (approximate) so we don't exceed limits in-app
     free_tier_rpm = {
         "gemini-2.0-flash-lite": 30,
@@ -85,7 +85,7 @@ def generate_with_fallback(contents: str, candidate_models=None, max_retries: in
             # If we've hit apparent local limit, skip model for now
             print(f"⏳ Local throttling for {model} (used {len(request_log[model])}/{rpm} in last 60s)")
             continue
-        for attempt in range(max_retries):
+        for attempt in range(min(max_retries, 2)):  # Max 2 retries per model
             try:
                 print(f"🔁 Trying Gemini model: {model} (attempt {attempt + 1})")
                 # Log this attempt
@@ -104,9 +104,9 @@ def generate_with_fallback(contents: str, candidate_models=None, max_retries: in
                 # Detect quota or rate limit errors and backoff to try the next model
                 if "resource_exhausted" in msg or "quota" in msg or "429" in msg or "rate limit" in msg:
                     print(f"⚠️ Gemini quota/rate limit hit for model {model}: {e}")
-                    # Sleep and retry current model a couple times
+                    # Sleep with exponential backoff: 2, 4, 8, 16 seconds
                     time.sleep(backoff)
-                    backoff = min(8, backoff * 2)
+                    backoff = min(16, backoff * 2)  # Cap at 16 seconds
                     # If rate limited, put model into cooldown for a minute (avoid retrying immediately)
                     cooldowns[model] = int(time.time() + 60)
                     continue

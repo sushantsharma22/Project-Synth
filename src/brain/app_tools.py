@@ -7,6 +7,7 @@ Date: November 17, 2025
 """
 
 import subprocess
+import time
 from langchain.tools import tool
 
 
@@ -119,51 +120,96 @@ def whatsapp_call(contact: str) -> str:
 
 @tool
 def whatsapp_message(contact: str, message: str) -> str:
-    """Send WhatsApp text message to contact.
+    """Send WhatsApp text message to contact using reliable AppleScript automation.
     
     Args:
-        contact: Contact first name
+        contact: Contact first name (e.g., 'John', 'Mom', 'Ajit')
         message: Message text to send
         
     Returns:
         Sent confirmation
     """
     try:
-        # Escape quotes in message
-        escaped_message = message.replace('"', '\\"')
+        print(f"🔧 WhatsApp Tool Called:")
+        print(f"   Contact: {contact}")
+        print(f"   Message: {message[:50]}...")
         
+        # Escape special characters for AppleScript
+        escaped_contact = contact.replace('\\', '\\\\').replace('"', '\\"')
+        escaped_message = message.replace('\\', '\\\\').replace('"', '\\"')
+        
+        # Rock-solid AppleScript with proper delays
         script = f'''
-        tell application "WhatsApp" to activate
-        delay 1
+        -- Activate WhatsApp
+        tell application "WhatsApp"
+            activate
+        end tell
+        delay 1.5
+        
         tell application "System Events"
             tell process "WhatsApp"
-                keystroke "f" using {{command down}}
+                set frontmost to true
                 delay 0.5
-                keystroke "{contact}"
-                delay 1
+                
+                -- Open new chat (Cmd+N is more reliable than Cmd+F)
+                keystroke "n" using command down
+                delay 1.5
+                
+                -- Type contact name
+                keystroke "{escaped_contact}"
+                delay 2
+                
+                -- Press down arrow to select first result
+                key code 125
+                delay 0.5
+                
+                -- Press return to open chat
                 keystroke return
-                delay 0.5
+                delay 2
+                
+                -- Type the message
                 keystroke "{escaped_message}"
-                delay 0.3
+                delay 1
+                
+                -- Send (Return key)
                 keystroke return
+                delay 0.5
             end tell
         end tell
+        
+        return "SUCCESS"
         '''
+        
+        print(f"📝 Executing AppleScript automation...")
         
         result = subprocess.run(
             ['osascript', '-e', script],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=20
         )
         
-        if result.returncode == 0:
-            return f"✅ Sent WhatsApp message to {contact}: {message[:50]}..."
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        
+        print(f"📤 Result: returncode={result.returncode}")
+        if stdout:
+            print(f"   stdout: {stdout}")
+        if stderr:
+            print(f"   stderr: {stderr}")
+        
+        if result.returncode == 0 or "SUCCESS" in stdout:
+            return f"✅ Sent WhatsApp message to {contact}: '{message[:40]}...'"
         else:
-            return f"⚠️ WhatsApp may not be installed or contact not found"
+            error_msg = stderr if stderr else "Unknown error"
+            return f"⚠️ WhatsApp automation error: {error_msg[:100]}"
             
+    except subprocess.TimeoutExpired:
+        return f"❌ WhatsApp automation timed out after 20s"
     except Exception as e:
-        return f"❌ Error sending WhatsApp message: {str(e)}"
+        import traceback
+        print(f"❌ Exception:\n{traceback.format_exc()}")
+        return f"❌ Error: {str(e)}"
 
 
 @tool

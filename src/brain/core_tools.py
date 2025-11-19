@@ -372,7 +372,27 @@ from src.brain.app_tools import APP_TOOLS
 from src.brain.ai_tools import AI_TOOLS
 
 
-# Export all tools (10 core + 8 file + 7 system + 10 app + 6 AI = 41 total)
+# ═══════════════════════════════════════════════════════════════════════
+# TOOL SUBSETS FOR DIFFERENT AGENT MODES
+# ═══════════════════════════════════════════════════════════════════════
+
+# CHAT MODE: Conversational with web search only (lightweight, focused)
+CHAT_TOOLS = [
+    web_search_tavily,  # Only web search for current events/facts
+    general_chat,       # Conversational AI for synthesis
+]
+
+# ASK MODE: Smart Q&A with web, clipboard, and text processing
+ASK_TOOLS = [
+    web_search_tavily,   # Web search for facts
+    get_clipboard,       # Read user's copied text
+    set_clipboard,       # Copy results for user
+    paraphrase_text,     # Improve writing
+    general_chat,        # Answer questions
+    *AI_TOOLS,          # Text explanation, summarization (6 tools)
+]
+
+# AGENT MODE: Full autonomous with ALL 41 tools
 ALL_TOOLS = [
     # Core tools (10)
     web_search_tavily,
@@ -394,3 +414,8 @@ ALL_TOOLS = [
     # AI text processing tools (6)
     *AI_TOOLS
 ]
+
+# Tool counts for reference
+# CHAT_TOOLS: 2 tools (web search + chat)
+# ASK_TOOLS: 11 tools (web, clipboard, paraphrase, chat + 6 AI tools)
+# ALL_TOOLS: 41 tools (complete autonomous agent)
