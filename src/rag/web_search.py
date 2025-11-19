@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-RAG - Web Search Module
+RAG - Web Search Module (Ultimate Hybrid Search Strategy)
+3-Tier Waterfall: Google (free) → DuckDuckGo (free) → Tavily (premium)
 Searches the web and retrieves relevant information for AI context
 """
 
 import requests
+import os
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import json
@@ -22,19 +24,98 @@ class SearchResult:
 
 class WebSearchRAG:
     """
-    Web search for RAG (Retrieval-Augmented Generation)
-    Searches multiple sources and aggregates results
+    Web Search RAG with Ultimate Hybrid Strategy
+    
+    3-Tier Waterfall Architecture:
+    ┌─────────────────────────────────────┐
+    │ TIER 1: Google Direct (Free)       │ ← Fast, 2s timeout
+    │ ↓ If 0 results                      │
+    │ TIER 2: DuckDuckGo (Free)          │ ← Reliable fallback
+    │ ↓ If 0 results OR deep research    │
+    │ TIER 3: Tavily (Premium)           │ ← Unblockable safety net
+    └─────────────────────────────────────┘
+    
+    Goal: Free 90% of the time, Unblockable 100% of the time
     """
     
     def __init__(self):
-        self.timeout = 8  # Increased from 5 to 8 seconds
-        # Add session for persistent cookies (helps avoid blocks)
+        self.timeout = 8  # Default timeout
+        
+        # Session for Google/DuckDuckGo (helps avoid blocks)
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         })
+        
+        # Tavily client (lazy initialization)
+        self._tavily_client = None
+        self._tavily_available = False
+        
+        # Try to initialize Tavily
+        try:
+            from tavily import TavilyClient
+            tavily_api_key = os.getenv("TAVILY_API_KEY")
+            if tavily_api_key:
+                self._tavily_client = TavilyClient(api_key=tavily_api_key)
+                self._tavily_available = True
+                print("🔑 Tavily initialized (Premium Tier available)")
+            else:
+                print("⚠️  Tavily API key not found (Premium Tier unavailable)")
+        except Exception as e:
+            print(f"⚠️  Tavily initialization failed: {e}")
+            self._tavily_available = False
+    
+    def search_tavily(self, query: str, max_results: int = 5) -> List[SearchResult]:
+        """
+        TIER 3: Premium search using Tavily API
+        
+        The "Unblockable" safety net - activated when free tiers fail
+        or for deep research queries.
+        
+        Args:
+            query: Search query
+            max_results: Maximum number of results (default 5)
+            
+        Returns:
+            List of SearchResult objects
+        """
+        results = []
+        
+        if not self._tavily_available:
+            print("❌ Tavily unavailable (API key not configured)")
+            return results
+        
+        try:
+            print(f"🔍 TIER 3 (Premium): Tavily search for '{query}'...")
+            
+            # Perform Tavily search with basic depth (faster, cheaper)
+            response = self._tavily_client.search(
+                query=query,
+                search_depth="basic",  # "basic" is faster/cheaper than "advanced"
+                max_results=max_results
+            )
+            
+            # Convert Tavily results to our standard format
+            if response and 'results' in response:
+                for item in response['results']:
+                    results.append(SearchResult(
+                        title=item.get('title', 'Untitled'),
+                        url=item.get('url', ''),
+                        snippet=item.get('content', '')[:500],  # Limit snippet length
+                        source='Tavily (Premium)'
+                    ))
+                
+                print(f"✅ Tavily returned {len(results)} results")
+            else:
+                print("⚠️  Tavily returned no results")
+                
+        except Exception as e:
+            print(f"❌ Tavily search error: {e}")
+            # Never crash - just return empty list
+        
+        return results
         
     def search_duckduckgo(self, query: str, max_results: int = 5) -> List[SearchResult]:
         """
@@ -219,129 +300,235 @@ class WebSearchRAG:
     
     def search_google_direct(self, query: str) -> List[SearchResult]:
         """
-        Search Google directly (PRIMARY method - free scraping)
-        Extracts direct answers from Knowledge Graph/Answer Box
+        TIER 1: Search Google directly (free scraping with answer extraction)
+        
+        Uses BeautifulSoup for reliable parsing of Google search results.
+        Stealthy headers to avoid detection.
+        Fast timeout (2s) - fails fast if blocked.
         """
         results = []
         try:
             import re
             from urllib.parse import quote
+            from bs4 import BeautifulSoup
             
-            # Better headers to avoid blocks
-            search_url = f"https://www.google.com/search?q={quote(query)}&num=10"
+            # Google search URL with multiple parameters to look more legitimate
+            search_url = f"https://www.google.com/search?q={quote(query)}&num=10&hl=en"
+            
+            # STEALTH HEADERS - Mimic real Chrome 122 on Mac (harder to detect)
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0"
             }
             
-            response = self.session.get(search_url, timeout=self.timeout)
+            # Fast timeout (2s) - fail fast if Google blocks us
+            response = self.session.get(search_url, headers=headers, timeout=2)
             
             if response.status_code == 200:
                 html = response.text
+                soup = BeautifulSoup(html, 'html.parser')
                 
-                # STEP 1: Extract Knowledge Graph / Answer Box (BNeawe class for direct answers)
-                # This captures weather, quick facts, definitions
-                answer_pattern = r'<div[^>]*class="[^"]*BNeawe[^"]*"[^>]*>([^<]+)</div>'
-                answer_matches = re.findall(answer_pattern, html)
+                # STEP 1: Try to extract Google Answer Box / Knowledge Graph
+                # Method A: Regex extraction for BNeawe class (direct answers)
+                answer_box_pattern = r'<div[^>]*class="[^"]*BNeawe[^"]*"[^>]*>([^<]+)</div>'
+                answer_matches = re.findall(answer_box_pattern, html)
                 
                 if answer_matches:
-                    # Combine first few matches for direct answer
-                    direct_answer = ' '.join(answer_matches[:3])
-                    # Clean up
-                    direct_answer = re.sub(r'\s+', ' ', direct_answer.strip())
+                    # Clean and combine answer matches
+                    direct_answer = ' '.join([match.strip() for match in answer_matches[:3]])
+                    direct_answer = ' '.join(direct_answer.split())  # Clean whitespace
                     
                     if direct_answer and len(direct_answer) > 10:
                         results.append(SearchResult(
                             title='📍 Direct Answer',
                             url='',
                             snippet=direct_answer[:500],
-                            source='Google Direct'
+                            source='Google Answer Box'
                         ))
-                        print(f"✅ Google Direct Answer: {direct_answer[:100]}...")
+                        print(f"✅ Google Answer Box (Regex): {direct_answer[:80]}...")
                 
-                # STEP 2: Extract regular search results
-                # Pattern for title
-                title_pattern = r'<h3[^>]*>([^<]+)</h3>'
-                titles = re.findall(title_pattern, html)
+                # Method B: BeautifulSoup extraction as fallback
+                if not answer_matches:
+                    answer_divs = soup.find_all('div', class_=re.compile(r'BNeawe.*'))
+                    if answer_divs and len(answer_divs) > 0:
+                        direct_answer = ' '.join([div.get_text() for div in answer_divs[:3]])
+                        direct_answer = ' '.join(direct_answer.split())  # Clean whitespace
+                        
+                        if direct_answer and len(direct_answer) > 10:
+                            results.append(SearchResult(
+                                title='📍 Direct Answer',
+                                url='',
+                                snippet=direct_answer[:500],
+                                source='Google Answer Box'
+                            ))
+                            print(f"✅ Google Answer Box (BS4): {direct_answer[:80]}...")
                 
-                # Pattern for snippet - multiple possible classes
-                snippet_patterns = [
-                    r'<div class="VwiC3b[^"]*"[^>]*>([^<]+)</div>',
-                    r'<span class="st"[^>]*>([^<]+)</span>',
-                    r'<div class="IsZvec"[^>]*>([^<]+)</div>'
-                ]
+                # STEP 2: Extract regular search results using BeautifulSoup
+                # Find all search result containers
+                search_divs = soup.find_all('div', class_='g')
                 
-                snippets = []
-                for pattern in snippet_patterns:
-                    snippets.extend(re.findall(pattern, html))
-                    if snippets:
-                        break
+                for div in search_divs[:8]:  # Top 8 results
+                    try:
+                        # Extract title (h3 tag)
+                        h3 = div.find('h3')
+                        title = h3.get_text() if h3 else None
+                        
+                        # Extract snippet (various possible classes)
+                        snippet_div = div.find('div', class_=re.compile(r'VwiC3b|IsZvec|s3v9rd'))
+                        snippet = snippet_div.get_text() if snippet_div else None
+                        
+                        # Extract URL (from anchor tag)
+                        link = div.find('a', href=True)
+                        url = str(link['href']) if link and link.get('href') else ''
+                        
+                        if title and snippet:
+                            results.append(SearchResult(
+                                title=title[:200],
+                                url=url[:300],
+                                snippet=snippet[:400],
+                                source='Google'
+                            ))
+                    except Exception as e:
+                        continue  # Skip malformed results
                 
-                print(f"🔍 Google: Found {len(titles)} titles, {len(snippets)} snippets for '{query}'")
-                
-                # Combine results (skip first result if we already have direct answer)
-                start_idx = 0
-                for i in range(start_idx, min(len(titles), len(snippets), 8)):
-                    if titles[i] and snippets[i]:
-                        results.append(SearchResult(
-                            title=titles[i][:200],
-                            url='',
-                            snippet=snippets[i][:400],
-                            source='Google'
-                        ))
-                
-                print(f"✅ Google: Extracted {len(results)} total results")
+                print(f"✅ Google (BeautifulSoup): Extracted {len(results)} results")
             else:
-                print(f"⚠️ Google returned status {response.status_code}")
+                print(f"⚠️  Google returned status {response.status_code}")
                     
         except Exception as e:
-            print(f"⚠️ Google search failed: {e}")
+            print(f"⚠️  Google search failed: {e}")
             
         return results
     
     def search(self, query: str, include_news: bool = True) -> Dict:
         """
-        Main search function - PRIORITIZES FREE GOOGLE SCRAPING
+        ULTIMATE HYBRID SEARCH - 3-Tier Waterfall Strategy
+        
+        Architecture:
+        ┌──────────────────────────────────────────────────┐
+        │ TIER 1: Google Direct (Free, 2s timeout)        │
+        │   ↓ If 0 results or blocked                     │
+        │ TIER 2: DuckDuckGo (Free, reliable fallback)    │
+        │   ↓ If BOTH fail OR deep research query         │
+        │ TIER 3: Tavily (Premium, unblockable)          │
+        └──────────────────────────────────────────────────┘
+        
+        Goal: Free 90% of the time, Unblockable 100% of the time
         
         Args:
             query: Search query
-            include_news: Whether to include recent news (default True for current events)
+            include_news: Whether to include recent news (default True)
             
         Returns:
             Dict with search results and formatted context
         """
         all_results = []
+        tier_used = []
         
-        # PRIORITY 1: Try Google Direct (free scraping with answer extraction)
-        print("🔍 PRIMARY: Trying Google Direct...")
+        # Check if this is a "deep research" query (needs premium)
+        query_lower = query.lower()
+        deep_research_keywords = [
+            'report', 'comprehensive', 'analysis', 'detailed study',
+            'in-depth', 'research paper', 'full analysis', 'complete report'
+        ]
+        needs_premium = any(keyword in query_lower for keyword in deep_research_keywords)
+        
+        # ═══════════════════════════════════════════════════════════
+        # TIER 1: Google Direct (Free & Fast)
+        # ═══════════════════════════════════════════════════════════
+        print("🔍 TIER 1 (Free): Trying Google Direct...")
         google_results = self.search_google_direct(query)
-        all_results.extend(google_results)
         
-        # PRIORITY 2: Only use DuckDuckGo if Google returns 0 results
-        if not google_results:
-            print("🔄 FALLBACK: Google returned 0 results, trying DuckDuckGo...")
-            ddg_results = self.search_duckduckgo(query, max_results=5)
-            all_results.extend(ddg_results)
-        else:
-            print(f"✅ Google returned {len(google_results)} results, skipping DuckDuckGo")
-        
-        # PRIORITY 3: News search (runs alongside if needed)
-        if include_news:
-            query_lower = query.lower()
-            news_keywords = ['latest', 'recent', 'today', 'election', 'news', 'current', 'yesterday', 'breaking', '2025', '2024']
-            actually_needs_news = any(keyword in query_lower for keyword in news_keywords)
+        if google_results and len(google_results) > 0:
+            print(f"✅ TIER 1 SUCCESS: Google returned {len(google_results)} results")
+            all_results.extend(google_results)
+            tier_used.append("Google (Free)")
             
-            if actually_needs_news:
+            # Check if we have a Direct Answer - if so, we're golden!
+            has_direct_answer = any('📍 Direct Answer' in r.title for r in google_results)
+            if has_direct_answer:
+                print("🎯 Direct Answer found - stopping here!")
+                # Skip other tiers, we have what we need
+            else:
+                # Good results but no direct answer - continue if query needs deep research
+                if not needs_premium:
+                    print("✅ Sufficient results from Google - stopping here")
+        else:
+            # ═══════════════════════════════════════════════════════════
+            # TIER 2: DuckDuckGo (Free Fallback)
+            # ═══════════════════════════════════════════════════════════
+            print("⚠️  TIER 1 FAILED: Google blocked/empty (0 results)")
+            print("🔍 TIER 2 (Free): Switching to DuckDuckGo...")
+            
+            ddg_results = self.search_duckduckgo(query, max_results=5)
+            
+            if ddg_results and len(ddg_results) > 0:
+                print(f"✅ TIER 2 SUCCESS: DuckDuckGo returned {len(ddg_results)} results")
+                all_results.extend(ddg_results)
+                tier_used.append("DuckDuckGo (Free)")
+                
+                # If not deep research, stop here
+                if not needs_premium:
+                    print("✅ Sufficient results from DuckDuckGo - stopping here")
+            else:
+                print("⚠️  TIER 2 FAILED: DuckDuckGo also returned 0 results")
+        
+        # ═══════════════════════════════════════════════════════════
+        # TIER 3: Tavily (Premium Safety Net)
+        # ═══════════════════════════════════════════════════════════
+        # Activate Tavily if:
+        # 1. BOTH Google and DuckDuckGo failed (0 results), OR
+        # 2. Query explicitly needs deep research
+        
+        should_use_tavily = (
+            (len(all_results) == 0) or  # Both free tiers failed
+            (needs_premium and len(all_results) < 3)  # Deep research needs more
+        )
+        
+        if should_use_tavily:
+            if len(all_results) == 0:
+                print("🚨 TIER 3 ACTIVATION: Both free tiers failed - activating Premium Fallback...")
+            else:
+                print(f"🔬 TIER 3 ACTIVATION: Deep research query detected - supplementing with Premium results...")
+            
+            tavily_results = self.search_tavily(query, max_results=5)
+            
+            if tavily_results and len(tavily_results) > 0:
+                print(f"✅ TIER 3 SUCCESS: Tavily returned {len(tavily_results)} results")
+                all_results.extend(tavily_results)
+                tier_used.append("Tavily (Premium)")
+            else:
+                print("⚠️  TIER 3 FAILED: Even Tavily returned 0 results (rare!)")
+        
+        # ═══════════════════════════════════════════════════════════
+        # OPTIONAL: News Search (runs alongside if needed)
+        # ═══════════════════════════════════════════════════════════
+        if include_news:
+            news_keywords = [
+                'latest', 'recent', 'today', 'election', 'news', 
+                'current', 'yesterday', 'breaking', '2025', '2024'
+            ]
+            needs_news = any(keyword in query_lower for keyword in news_keywords)
+            
+            if needs_news:
                 print("📰 Adding news results...")
                 news_results = self.search_news(query)
-                all_results.extend(news_results)
+                if news_results:
+                    all_results.extend(news_results)
+                    tier_used.append("News Feed")
         
-        # Deduplicate by URL/title
+        # ═══════════════════════════════════════════════════════════
+        # FINALIZE: Deduplicate and format
+        # ═══════════════════════════════════════════════════════════
         seen = set()
         unique_results = []
         for result in all_results:
@@ -353,12 +540,18 @@ class WebSearchRAG:
         # Format context for AI
         context = self.format_context(unique_results)
         
+        # Summary message
+        tier_summary = " → ".join(tier_used) if tier_used else "No tiers used"
+        print(f"\n📊 SEARCH COMPLETE: {len(unique_results)} unique results")
+        print(f"🔄 Tiers used: {tier_summary}")
+        
         return {
             'query': query,
             'results': unique_results,
             'context': context,
             'timestamp': datetime.now().isoformat(),
-            'sources_count': len(unique_results)
+            'sources_count': len(unique_results),
+            'tiers_used': tier_used  # Track which tiers were activated
         }
     
     def format_context(self, results: List[SearchResult]) -> str:

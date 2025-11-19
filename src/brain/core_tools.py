@@ -1,9 +1,9 @@
 """
 Core Tools for Project Synth Autonomous Agent
-10 essential tools using @tool decorator for LangGraph agent
+Enhanced with Live Tools for instant, free specific queries
 
 Author: Sushant Sharma
-Date: November 17, 2025
+Date: November 19, 2025
 """
 
 import os
@@ -37,6 +37,16 @@ from AppKit import NSPasteboard
 import pyperclip
 from dotenv import load_dotenv
 
+# Import Live Tools (instant, free, specific queries)
+from src.brain.live_tools import (
+    get_weather,
+    get_stock_price,
+    search_wikipedia,
+    get_definition,
+    is_website_down,
+    search_reddit_opinions
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -44,15 +54,14 @@ load_dotenv()
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not TAVILY_API_KEY:
-    raise ValueError("TAVILY_API_KEY not found in .env file. Please add it.")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in .env file. Please add it.")
 
 
 @tool
-def web_search_tavily(query: str) -> str:
-    """Search web for current info, news, facts, recent events. Use for any time-sensitive or factual queries.
+def web_search_free(query: str) -> str:
+    """Search web for current info, news, facts, recent events. FREE with 3-tier fallback system.
+    Use for any time-sensitive or factual queries that aren't covered by specific tools.
     
     Args:
         query: Search query string
@@ -61,6 +70,38 @@ def web_search_tavily(query: str) -> str:
         Formatted search results with titles and snippets
     """
     try:
+        from src.rag.web_search import WebSearchRAG
+        
+        # Initialize web search RAG
+        rag = WebSearchRAG()
+        
+        # Perform search (3-tier: Google → DuckDuckGo → Tavily)
+        results = rag.search(query, include_news=True)
+        
+        if results['sources_count'] == 0:
+            return f"No results found for: {query}"
+        
+        # Return formatted context
+        return results['context']
+        
+    except Exception as e:
+        return f"Error searching web: {str(e)}"
+
+
+@tool
+def web_search_tavily(query: str) -> str:
+    """DEPRECATED: Use web_search_free instead. Legacy Tavily search (requires API key).
+    
+    Args:
+        query: Search query string
+        
+    Returns:
+        Formatted search results
+    """
+    try:
+        if not TAVILY_API_KEY:
+            return "⚠️  Tavily API key not configured. Using free web search instead..."
+        
         search = TavilySearchResults(
             api_key=TAVILY_API_KEY,
             max_results=5
@@ -372,50 +413,65 @@ from src.brain.app_tools import APP_TOOLS
 from src.brain.ai_tools import AI_TOOLS
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# TOOL SUBSETS FOR DIFFERENT AGENT MODES
-# ═══════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# ASK_TOOLS - Safe Mode (Read-Only, No Actions)
+# ═══════════════════════════════════════════════════════════════════════════
+# CRITICAL: This list contains ONLY informational tools.
+# NO file operations, NO system commands, NO app launching.
+# Perfect for "Ask" mode where users expect information, not actions.
 
-# CHAT MODE: Conversational with web search only (lightweight, focused)
-CHAT_TOOLS = [
-    web_search_tavily,  # Only web search for current events/facts
-    general_chat,       # Conversational AI for synthesis
-]
-
-# ASK MODE: Smart Q&A with web, clipboard, and text processing
 ASK_TOOLS = [
-    web_search_tavily,   # Web search for facts
-    get_clipboard,       # Read user's copied text
-    set_clipboard,       # Copy results for user
-    paraphrase_text,     # Improve writing
-    general_chat,        # Answer questions
-    *AI_TOOLS,          # Text explanation, summarization (6 tools)
+    # Web & Information Retrieval
+    web_search_free,          # Primary web search (3-tier: Google→DDG→Tavily)
+    search_wikipedia,         # Wikipedia summaries (Who/What questions)
+    search_reddit_opinions,   # Reddit community opinions
+    
+    # Live Data Tools
+    get_weather,              # Weather, temperature, umbrella questions
+    get_stock_price,          # Stock/crypto prices
+    get_definition,           # Word definitions
+    is_website_down,          # Website status checks
+    
+    # System Info (Read-Only)
+    get_clipboard,            # Read clipboard
+    file_search,              # Find files (doesn't modify)
+    get_disk_space,           # Disk usage info
+    
+    # AI Utilities
+    general_chat,             # General Q&A
+    paraphrase_text,          # Text improvement
 ]
 
-# AGENT MODE: Full autonomous with ALL 41 tools
+# ═══════════════════════════════════════════════════════════════════════════
+# ALL_TOOLS - Agent Mode (God Mode, Full Capabilities)
+# ═══════════════════════════════════════════════════════════════════════════
+# Contains EVERYTHING: read, write, execute, control system
+# Use this for autonomous agent mode where full control is granted.
+
 ALL_TOOLS = [
-    # Core tools (10)
-    web_search_tavily,
-    file_search,
-    clean_temp_files,
-    get_disk_space,
-    open_app,
-    chrome_search,
-    get_clipboard,
-    set_clipboard,
-    paraphrase_text,
-    general_chat,
-    # File system tools (8)
+    # Safe tools from ASK_TOOLS
+    *ASK_TOOLS,
+    
+    # Action tools (NOT in ASK_TOOLS - can modify system)
+    web_search_tavily,        # Legacy Tavily (requires API key)
+    clean_temp_files,         # Delete files
+    open_app,                 # Launch applications
+    chrome_search,            # Open browser
+    set_clipboard,            # Modify clipboard
+    
+    # File system tools (8) - Can create/modify/delete files
     *FILE_TOOLS,
-    # System control tools (7)
+    
+    # System control tools (7) - Can execute commands, control system
     *SYSTEM_TOOLS,
-    # App control tools (10)
+    
+    # App control tools (10) - Can control applications
     *APP_TOOLS,
+    
     # AI text processing tools (6)
     *AI_TOOLS
 ]
 
-# Tool counts for reference
-# CHAT_TOOLS: 2 tools (web search + chat)
-# ASK_TOOLS: 11 tools (web, clipboard, paraphrase, chat + 6 AI tools)
-# ALL_TOOLS: 41 tools (complete autonomous agent)
+# Summary:
+# - ASK_TOOLS: 13 safe, read-only tools (information retrieval only)
+# - ALL_TOOLS: 13 + 26 = ~50+ tools (full system control)
