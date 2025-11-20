@@ -16,6 +16,7 @@ import threading
 import time
 import atexit
 import os
+import re
 import signal
 from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem,
                     NSTextField, NSButton, NSView, NSColor, NSFont,
@@ -68,6 +69,7 @@ from src.ui.chat_manager import ChatManager
 # Global variable to store SSH tunnel process
 ssh_tunnel_process = None
 ssh_connection_id = None  # Store SSH username@host for cleanup
+control_socket_path = None  # Full path to the ssh ControlPath socket
 
 def start_ssh_tunnel():
     """
@@ -99,6 +101,9 @@ def start_ssh_tunnel():
         return
     
     ssh_connection_id = ssh_id  # Store for cleanup
+    # Use an absolute control socket path (avoid ~ expansion problems)
+    global control_socket_path
+    control_socket_path = os.path.expanduser(f"~/.ssh/synth-tunnel-{os.getpid()}")
     
     print("\n" + "="*60)
     print("🔌 STARTING DELTA BRAIN SSH TUNNEL")
@@ -138,7 +143,7 @@ def start_ssh_tunnel():
         "-o", "ServerAliveInterval=30",     # Keep connection alive
         "-o", "ServerAliveCountMax=3",      # Retry 3 times
         "-o", "ControlMaster=auto",         # Enable control socket
-        "-o", f"ControlPath=~/.ssh/synth-tunnel-{os.getpid()}",  # Unique socket per app instance
+        "-o", f"ControlPath={control_socket_path}",  # Unique socket per app instance (absolute path)
         "-L", "11434:localhost:11434",     # Fast model (3B)
         "-L", "11435:localhost:11435",     # Balanced model (7B)
         "-L", "11436:localhost:11436",     # Smart model (14B)
@@ -158,37 +163,43 @@ def start_ssh_tunnel():
         )
         
         print(f"✅ SSH tunnel started (PID: {ssh_tunnel_process.pid})")
-        print("   Waiting 3 seconds for connection to establish...")
-        
-        # Wait for connection to establish
-        time.sleep(3)
-        
-        # Verify tunnel is working by checking ports
-        ports_ok = True
-        for port in [11434, 11435, 11436]:
-            try:
-                result = subprocess.run(
-                    ["nc", "-z", "localhost", str(port)],
-                    capture_output=True,
-                    timeout=1
-                )
-                if result.returncode == 0:
-                    print(f"   ✅ Port {port} - Connected")
-                else:
-                    print(f"   ⚠️  Port {port} - Not responding")
-                    ports_ok = False
-            except Exception as e:
-                print(f"   ⚠️  Port {port} - Check failed: {e}")
-                ports_ok = False
-        
+        print("   Waiting for connection to establish and verifying forwarded ports...")
+
+        # Wait / retry for ports to become available (tunnel may be up before remote services)
+        ports_ok = False
+        max_attempts = 12  # up to ~12 * 0.5s = 6s total wait
+        for attempt in range(max_attempts):
+            all_ok = True
+            for port in [11434, 11435, 11436]:
+                try:
+                    result = subprocess.run(
+                        ["nc", "-z", "localhost", str(port)],
+                        capture_output=True,
+                        timeout=1
+                    )
+                    if result.returncode != 0:
+                        all_ok = False
+                        break
+                except Exception:
+                    all_ok = False
+                    break
+
+            if all_ok:
+                ports_ok = True
+                break
+
+            # short backoff and retry
+            time.sleep(0.5)
+
+        # Report final status
         if ports_ok:
             print("\n✅ DELTA BRAIN TUNNEL ESTABLISHED")
             print("   Fast (3B):     localhost:11434")
             print("   Balanced (7B): localhost:11435")
             print("   Smart (14B):   localhost:11436")
         else:
-            print("\n⚠️  Some ports not responding - tunnel may still be connecting")
-            print("   Brain will fall back to Gemini if Delta is unavailable")
+            print("\n⚠️  Ports not responding after wait - tunnel is running but remote services may be down")
+            print("   Brain may fall back to Gemini until Delta becomes available")
         
         print("="*60 + "\n")
         
@@ -209,7 +220,11 @@ def cleanup_tunnel():
     """
     global ssh_tunnel_process, ssh_connection_id
     
-    if ssh_tunnel_process is None:
+    # If we have no reference to the SSH process but a control socket exists,
+    # still attempt cleanup (covers edge cases where start detected an
+    # existing tunnel or start failed to retain the Popen handle).
+    global control_socket_path
+    if ssh_tunnel_process is None and not control_socket_path:
         return
     
     print("\n" + "="*60)
@@ -218,14 +233,27 @@ def cleanup_tunnel():
     
     # STEP 1: Kill ALL SSH tunnels to Delta (in case sshpass creates orphans)
     try:
-        print("📡 Killing all SSH tunnels to Delta (including orphaned processes)...")
+        print("📡 Killing all SSH tunnels related to this connection (including orphaned processes)...")
+        # Prefer using the actual host from SSH_ID when available
+        host_part = None
+        try:
+            if ssh_connection_id and '@' in ssh_connection_id:
+                host_part = ssh_connection_id.split('@')[1]
+        except:
+            host_part = None
+
+        if host_part:
+            pkill_pattern = f"ssh.*11434.*{host_part}"
+        else:
+            pkill_pattern = "ssh.*11434"
+
         # Use pkill to ensure we get ALL related processes
         subprocess.run(
-            ["pkill", "-f", "ssh.*11434.*delta.cs.uwindsor.ca"],
+            ["pkill", "-f", pkill_pattern],
             capture_output=True,
             timeout=5
         )
-        print("✅ All SSH tunnel processes killed")
+        print("✅ pkill executed (if any matching SSH processes existed)")
     except subprocess.TimeoutExpired:
         print("⚠️  Process cleanup timed out")
     except Exception as e:
@@ -234,16 +262,20 @@ def cleanup_tunnel():
     # STEP 2: Clean up remote control socket (Delta side)
     if ssh_connection_id:
         try:
-            print("📡 Cleaning up remote control socket on Delta...")
-            control_path = f"~/.ssh/synth-tunnel-{ssh_tunnel_process.pid}"
-            
-            # Send exit command through control socket to cleanly close remote end
+            print("📡 Cleaning up remote control socket (if present) using ssh -O exit...")
+            # Use the same control socket path we created (absolute path)
+            if control_socket_path:
+                control_path_arg = control_socket_path
+            else:
+                # Fallback to previous behavior (may be incorrect if PIDs differ)
+                control_path_arg = os.path.expanduser(f"~/.ssh/synth-tunnel-{ssh_tunnel_process.pid if ssh_tunnel_process else 'unknown'}")
+
             subprocess.run(
-                ["ssh", "-O", "exit", "-o", f"ControlPath={control_path}", ssh_connection_id],
+                ["ssh", "-O", "exit", "-o", f"ControlPath={control_path_arg}", ssh_connection_id],
                 capture_output=True,
                 timeout=5
             )
-            print("✅ Remote control socket cleaned up")
+            print("✅ Remote control socket cleaned up (ssh -O exit attempted)")
         except subprocess.TimeoutExpired:
             print("⚠️  Remote cleanup timed out (socket may already be closed)")
         except Exception as e:
@@ -251,25 +283,25 @@ def cleanup_tunnel():
     
     # STEP 3: Kill local SSH process group (backup cleanup)
     try:
-        # Get process group ID
-        pgid = os.getpgid(ssh_tunnel_process.pid)
-        
-        print(f"📡 Terminating process group (PID: {ssh_tunnel_process.pid}, PGID: {pgid})")
-        
-        # Kill entire process group (handles child processes too)
-        os.killpg(pgid, signal.SIGTERM)
-        
-        # Wait for process to terminate (with timeout)
-        try:
-            ssh_tunnel_process.wait(timeout=3)
-            print("✅ Process group terminated cleanly")
-        except subprocess.TimeoutExpired:
-            # Force kill if graceful termination fails
-            print("⚠️  Graceful termination timed out, forcing...")
-            os.killpg(pgid, signal.SIGKILL)
-            ssh_tunnel_process.wait()
-            print("✅ Process group force-killed")
-        
+        # If we have a live Popen handle, try to terminate its process group
+        if ssh_tunnel_process:
+            pgid = os.getpgid(ssh_tunnel_process.pid)
+            print(f"📡 Terminating process group (PID: {ssh_tunnel_process.pid}, PGID: {pgid})")
+            os.killpg(pgid, signal.SIGTERM)
+
+            # Wait for process to terminate (with timeout)
+            try:
+                ssh_tunnel_process.wait(timeout=3)
+                print("✅ Process group terminated cleanly")
+            except subprocess.TimeoutExpired:
+                # Force kill if graceful termination fails
+                print("⚠️  Graceful termination timed out, forcing...")
+                os.killpg(pgid, signal.SIGKILL)
+                ssh_tunnel_process.wait()
+                print("✅ Process group force-killed")
+        else:
+            print("ℹ️ No local Popen handle; pkill/ssh -O exit were used as best-effort cleanup")
+
     except ProcessLookupError:
         print("⚠️  Process group already terminated")
     except Exception as e:
@@ -277,13 +309,20 @@ def cleanup_tunnel():
     
     # STEP 4: Final verification - ensure no processes remain
     try:
+        # Final verification - try to find any remaining ssh processes matching our host
+        if ssh_connection_id and '@' in ssh_connection_id:
+            host_part = ssh_connection_id.split('@')[1]
+            pgrep_pattern = f"ssh.*11434.*{host_part}"
+        else:
+            pgrep_pattern = "ssh.*11434"
+
         result = subprocess.run(
-            ["pgrep", "-f", "ssh.*11434.*delta.cs.uwindsor.ca"],
+            ["pgrep", "-f", pgrep_pattern],
             capture_output=True,
             text=True
         )
-        if result.returncode == 0:
-            remaining_pids = result.stdout.strip().split('\n')
+        if result.returncode == 0 and result.stdout.strip():
+            remaining_pids = [p for p in result.stdout.strip().split('\n') if p.strip()]
             print(f"⚠️  Found {len(remaining_pids)} remaining processes, force-killing...")
             for pid in remaining_pids:
                 try:
@@ -298,8 +337,13 @@ def cleanup_tunnel():
     
     # STEP 5: Clean up local control socket file
     try:
-        control_path = os.path.expanduser(f"~/.ssh/synth-tunnel-{ssh_tunnel_process.pid}")
-        if os.path.exists(control_path):
+        # Remove the exact control socket path we created earlier if present
+        if control_socket_path:
+            control_path = control_socket_path
+        else:
+            control_path = os.path.expanduser(f"~/.ssh/synth-tunnel-{ssh_tunnel_process.pid if ssh_tunnel_process else 'unknown'}")
+
+        if control_path and os.path.exists(control_path):
             os.remove(control_path)
             print("✅ Local control socket file removed")
     except Exception as e:
@@ -310,6 +354,7 @@ def cleanup_tunnel():
     
     ssh_tunnel_process = None
     ssh_connection_id = None
+    control_socket_path = None
 
 
 class CopyableTextView(NSTextView):
@@ -413,44 +458,27 @@ class CopyableTextView(NSTextView):
         return objc.super(CopyableTextView, self).validateUserInterfaceItem_(item)
     
     def copy_(self, sender):
-        """Handle copy in menu bar context"""
+        """Copy selected text (or full text) to the general pasteboard."""
         try:
             selectedRange = self.selectedRange()
-
-            # selectedRange can be an NSObject with .location/.length or a tuple (loc, length)
+            text = ""
             try:
-                loc = int(selectedRange.location)
-                length = int(selectedRange.length)
+                if selectedRange and selectedRange.length > 0:
+                    s = str(self.string())
+                    text = s[selectedRange.location:selectedRange.location + selectedRange.length]
+                else:
+                    text = str(self.string())
             except Exception:
-                try:
-                    loc, length = selectedRange
-                    loc = int(loc); length = int(length)
-                except Exception:
-                    # Fallback - no selection
-                    loc, length = 0, 0
+                text = str(self.string())
 
-            # Get selected text or all text
-            if length > 0:
-                text = self.string()[loc: loc + length]
-            else:
-                text = self.string()
-            
-            if text:
-                # Access pasteboard directly
-                pasteboard = NSPasteboard.generalPasteboard()
-                pasteboard.clearContents()
-                
-                # Try both type strings for compatibility
-                success = pasteboard.setString_forType_(text, "public.utf8-plain-text")
-                if not success:
-                    pasteboard.setString_forType_(text, "NSStringPboardType")
-                
-                # copied to clipboard (silent)
-                return True
-            else:
-                print("⚠️ No text to copy")
+            if not text:
                 return False
-                
+
+            pasteboard = NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            pasteboard.setString_forType_(text, "public.utf8-plain-text")
+
+            return True
         except Exception as e:
             print(f"❌ Copy error: {e}")
             import traceback
@@ -835,10 +863,29 @@ class SynthMenuBarNative(NSObject):
         self.clipboard_max_age = 300   # Seconds before clipboard text expires
         self.start_clipboard_monitor()  # Monitor for Cmd+C events
         
-        # Create status bar item
+        # Create status bar item and set its button target/action (more reliable)
         self.statusbar = NSStatusBar.systemStatusBar()
         self.statusitem = self.statusbar.statusItemWithLength_(-1)  # Variable width
-        self.statusitem.setTitle_("Synth")
+        # Use the NSStatusItem's button when available (preferred on modern macOS)
+        try:
+            btn = self.statusitem.button()
+            if btn is not None:
+                btn.setTitle_("Synth")
+                btn.setAction_("togglePanel:")
+                btn.setTarget_(self)
+            else:
+                # Fallback: set on statusitem itself
+                self.statusitem.setTitle_("Synth")
+                self.statusitem.setAction_("togglePanel:")
+                self.statusitem.setTarget_(self)
+        except Exception:
+            # Best-effort fallback
+            try:
+                self.statusitem.setTitle_("Synth")
+                self.statusitem.setAction_("togglePanel:")
+                self.statusitem.setTarget_(self)
+            except:
+                pass
         
         # Create custom panel (replaces NSMenu)
         self.panel = SynthPanel.alloc().init()
@@ -848,10 +895,92 @@ class SynthMenuBarNative(NSObject):
         
         # Set content view
         self.panel.setContentView_(self.input_view)
+
+        # Store original compact size for reset
+        self.original_compact_height = 190
+        # Flag to suppress background updates during UI transitions
+        self._suppress_bg_updates = False
         
-        # Set action to toggle panel
-        self.statusitem.setAction_("togglePanel:")
-        self.statusitem.setTarget_(self)
+        # Ensure outer panel has rounded corners so the glassmorphed background
+        # appears rounded at the window level (round both contentView and its
+        # superview/theme frame). Keep panel non-opaque so transparency shows.
+        try:
+            self.panel.setOpaque_(False)
+            # Round content view (clips inner content)
+            cv = self.panel.contentView()
+            if cv is not None:
+                try:
+                    cv.setWantsLayer_(True)
+                except Exception as e:
+                    print(f"⚠️ Failed to set wantsLayer on contentView: {e}")
+                try:
+                    cv.layer().setCornerRadius_(20.0)
+                    cv.layer().setMasksToBounds_(True)
+                except Exception:
+                    try:
+                        l = cv.layer()
+                        setattr(l, 'cornerRadius', 20.0)
+                        setattr(l, 'masksToBounds', True)
+                    except:
+                        print("⚠️ Failed to set layer attributes on contentView theme layer")
+
+            # Also round the containing theme frame / superview so the
+            # outermost window edges are rounded (this fixes the sharp outer
+            # corners visible in the screenshot).
+            try:
+                theme_view = None
+                if cv is not None:
+                    try:
+                        theme_view = cv.superview()
+                    except:
+                        theme_view = None
+                if theme_view is None:
+                    try:
+                        theme_view = self.panel.contentView().superview()
+                    except:
+                        theme_view = None
+
+                if theme_view is not None:
+                    try:
+                        theme_view.setWantsLayer_(True)
+                    except Exception as e:
+                        print(f"⚠️ Failed to set wantsLayer on theme_view: {e}")
+                    try:
+                        # Do NOT maskToBounds on the theme frame so shadows can draw
+                        theme_view.layer().setCornerRadius_(20.0)
+                        try:
+                            theme_view.layer().setMasksToBounds_(False)
+                        except Exception:
+                            try:
+                                setattr(theme_view.layer(), 'masksToBounds', False)
+                            except Exception as e:
+                                print(f"⚠️ Failed to set masksToBounds on theme_view.layer: {e}")
+                    except Exception:
+                        try:
+                            l2 = theme_view.layer()
+                            setattr(l2, 'cornerRadius', 20.0)
+                            setattr(l2, 'masksToBounds', False)
+                        except Exception as e:
+                            print(f"⚠️ Failed to set fallback layer attributes on theme_view: {e}")
+            except Exception:
+                pass
+
+            # Restore a semi-transparent background (do NOT make fully clear)
+            # so the panel keeps its glassmorphic look but shows rounded edges.
+            try:
+                self.panel.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.12, 0.12, 0.15, 0.92))
+            except Exception as e:
+                print(f"⚠️ Failed to set panel background color: {e}")
+
+            # Ensure the panel remains movable by dragging its background
+            try:
+                self.panel.setMovableByWindowBackground_(True)
+            except Exception as e:
+                print(f"⚠️ Failed to make panel movable by background: {e}")
+        except Exception as e:
+            print(f"⚠️ Error during panel rounding/background setup: {e}")
+        
+        # Action already attached to status item/button above
         
         # Create Edit menu for Copy/Paste support (CRITICAL for text editing)
         self.create_edit_menu()
@@ -1202,50 +1331,40 @@ class SynthMenuBarNative(NSObject):
     def togglePanel_(self, sender):
         """Toggle panel visibility and ALWAYS position it under the status item (like Spotlight)"""
         if self.panel.isVisible():
-            # Hide panel when clicking icon again
-            self.panel.orderOut_(None)
-            self.stop_click_monitor()
+            # Close via centralized helper (restores original size/position)
+            try:
+                self.close_panel()
+            except Exception:
+                try:
+                    self.panel.orderOut_(None)
+                except:
+                    pass
         else:
-            # CRITICAL: ALWAYS reposition under Synth icon (ignore last position)
-            # This ensures panel appears under icon even if user dragged it elsewhere
-            self.position_panel_under_status_item()
-            
-            # Initialize placeholder if needed
-            if not hasattr(self, 'showing_placeholder'):
-                self.showing_placeholder = True
-                self.input_text_view.setString_(self.placeholder_text)
-                self.input_text_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.5, 0.5, 0.55, 0.6))
-            
-            # Activate and show panel
+            # Restore original frame if available before showing
+            try:
+                opf = getattr(self, 'original_panel_frame', None)
+                if opf and len(opf) >= 4:
+                    self.panel.setFrame_display_(NSMakeRect(opf[0], opf[1], opf[2], opf[3]), True)
+                    try:
+                        self.relayout_for_width()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Position under status item and show
+            try:
+                self.position_panel_under_status_item()
+            except Exception:
+                pass
+
             NSApp.activateIgnoringOtherApps_(True)
             self.panel.makeKeyAndOrderFront_(None)
-            
-            # Start monitoring for clicks outside panel
-            self.start_click_monitor()
-            
-            # Focus input text view
             try:
-                window = self.input_text_view.window()
-                if window:
-                    window.makeFirstResponder_(self.input_text_view)
-                    # Clear placeholder on focus
-                    if self.showing_placeholder:
-                        self.input_text_view.setString_("")
-                        self.input_text_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))
-                        self.showing_placeholder = False
-                    
-                    # Blue border on focus
-                    try:
-                        self.input_container.layer().setBorderColor_(self.focus_border_color.CGColor())
-                        self.input_container.layer().setBorderWidth_(1.5)
-                    except:
-                        pass
-                    
-                    # Move cursor to end
-                    text_length = len(str(self.input_text_view.string()))
-                    self.input_text_view.setSelectedRange_((text_length, 0))
-            except Exception as e:
-                print(f"⚠️ Error focusing input: {e}")
+                self.prepare_prompt_entry()
+            except Exception:
+                pass
+            self.start_click_monitor()
     
     def position_panel_under_status_item(self):
         """Position panel centered under the status item - called EVERY time panel opens or expands"""
@@ -1270,7 +1389,7 @@ class SynthMenuBarNative(NSObject):
                     
                     # CRITICAL: ALWAYS update position (ignore where user dragged it)
                     self.panel.setFrameOrigin_(NSPoint(x, y))
-                    print(f"✅ Panel repositioned at ({x:.0f}, {y:.0f}) under Synth icon")
+                    # NOTE: suppress noisy reposition messages to the output/result view
                     return
         except Exception as e:
             print(f"⚠️ Error positioning panel: {e}")
@@ -1284,9 +1403,33 @@ class SynthMenuBarNative(NSObject):
                 x = (screen_frame.size.width - panel_frame.size.width) / 2
                 y = screen_frame.origin.y + screen_frame.size.height - panel_frame.size.height - 60
                 self.panel.setFrameOrigin_(NSPoint(x, y))
-                print(f"⚠️ Fallback: Panel centered on screen at ({x:.0f}, {y:.0f})")
+                # Suppress fallback reposition message
         except Exception as e:
             print(f"❌ Failed to position panel: {e}")
+
+    def is_panel_on_any_screen(self):
+        """Return True if the panel overlaps any visible screen area.
+
+        Used to avoid forcibly repositioning a panel the user dragged onto another area.
+        """
+        try:
+            from AppKit import NSScreen
+            screens = NSScreen.screens()
+            panel_frame = self.panel.frame()
+            for s in screens:
+                sf = s.visibleFrame()
+                # Check for rectangle overlap
+                if not (
+                    (panel_frame.origin.x + panel_frame.size.width) < sf.origin.x or
+                    (panel_frame.origin.x) > (sf.origin.x + sf.size.width) or
+                    (panel_frame.origin.y + panel_frame.size.height) < sf.origin.y or
+                    (panel_frame.origin.y) > (sf.origin.y + sf.size.height)
+                ):
+                    return True
+            return False
+        except Exception:
+            # If anything fails, conservatively return True so we don't jump the panel
+            return True
     
     def start_click_monitor(self):
         """Start monitoring for clicks outside the panel"""
@@ -1307,9 +1450,14 @@ class SynthMenuBarNative(NSObject):
                 # Check if click is inside panel
                 if not (panel_frame.origin.x <= click_location.x <= panel_frame.origin.x + panel_frame.size.width and
                         panel_frame.origin.y <= click_location.y <= panel_frame.origin.y + panel_frame.size.height):
-                    # Click is outside panel - close it
-                    self.panel.orderOut_(None)
-                    self.stop_click_monitor()
+                    # Click is outside panel - close it via helper so size resets
+                    try:
+                        self.close_panel()
+                    except Exception:
+                        try:
+                            self.panel.orderOut_(None)
+                        except:
+                            pass
             except Exception as e:
                 print(f"⚠️ Click monitor error: {e}")
             
@@ -1379,15 +1527,26 @@ class SynthMenuBarNative(NSObject):
             print(f"⚠️ Unable to focus input view: {exc}")
 
     def reset_to_compact_view(self):
-        """Hide result pane and shrink container back to compact height."""
+        """Hide result pane and shrink container back to compact height with welcome message."""
+        # Store current top-left position before resize
+        panel_frame = self.panel.frame()
+        original_top = panel_frame.origin.y + panel_frame.size.height
+        
+        # Hide result area and reset to compact size
         self.scroll_border_box.setHidden_(True)
         self.current_result_height = 0
-        self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, self.compact_height))
+        self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, self.original_compact_height))
         
-        # Resize panel to compact size
-        panel_frame = self.panel.frame()
-        panel_frame.size.height = self.compact_height
+        # Resize panel to compact size, keeping top-left anchored
+        new_y = original_top - self.original_compact_height
+        panel_frame.origin.y = new_y
+        panel_frame.size.height = self.original_compact_height
         self.panel.setFrame_display_(panel_frame, True)
+        
+        # Show welcome message
+        self.scroll_border_box.setHidden_(False)
+        self.safe_update_result("✨ Welcome to Synth\n\nAsk me anything!")
+        self.expand_view_for_content(100)
         
         # Restore placeholder if input is empty
         if not str(self.input_text_view.string()).strip():
@@ -1421,12 +1580,9 @@ The plugin will automatically activate when relevant to your query."""
             self.safe_update_result(f"❌ Plugin '{plugin_name}' not found")
     
     def clearResults_(self, sender):
-        """Clear the result area and reset view - but keep input text!"""
-        # Clear result area
-        self.result_view.setString_("")
-        
-        # DON'T clear input - let user edit or reuse it!
-        # self.input_text_view.setString_("")  # REMOVED - keep text for editing
+        """Clear the result area and reset to original welcome state"""
+        # Clear input text
+        self.input_text_view.setString_("")
         self.input_text_view.setEditable_(True)
         
         # RESET CLIPBOARD STATE - user must do Cmd+C again to capture new text
@@ -1438,15 +1594,14 @@ The plugin will automatically activate when relevant to your query."""
         
         # Show appropriate message based on mode
         if self.chat_mode_active:
+            # In chat mode, just clear conversation but keep expanded
             self.safe_update_result("💬 Chat Mode Active\n\nConversation cleared. Start a new conversation...")
             self.scroll_border_box.setHidden_(False)
             self.expand_view_for_content(100)
         else:
-            print("🔄 Cleared: Clipboard, Results, and Chat History")
+            # Normal mode: return to original compact welcome state
+            print("🔄 Cleared: Returning to welcome screen")
             self.reset_to_compact_view()
-        
-        # ALWAYS reposition panel under Synth icon after clearing
-        self.position_panel_under_status_item()
         
         # Focus back on input so user can type immediately
         self.prepare_prompt_entry()
@@ -1686,6 +1841,13 @@ The plugin will automatically activate when relevant to your query."""
     
     def toggleChatMode_(self, sender):
         """Toggle Chat Mode ON/OFF - COMPLETE IMPLEMENTATION"""
+        # Suppress background responses briefly while UI transitions
+        try:
+            self._suppress_bg_updates = True
+            threading.Timer(0.8, lambda: setattr(self, '_suppress_bg_updates', False)).start()
+        except Exception:
+            pass
+
         self.chat_mode_active = not self.chat_mode_active
         
         if self.chat_mode_active:
@@ -2102,26 +2264,28 @@ Log file: logs/ask_button/ask_session_*.log"""
         thread.start()
     
     def expand_view_for_content(self, content_height):
-        """Expand the view to fit content"""
+        """Expand the view to fit content - grows DOWNWARD from top-left anchor"""
         # Calculate new total height with guard rails
         result_height = min(self.max_result_height, max(100, content_height))
         new_total_height = result_height + 142  # Account for input + buttons (2 rows)
         self.current_result_height = result_height
         
+        # Store current top-left position
+        panel_frame = self.panel.frame()
+        original_top = panel_frame.origin.y + panel_frame.size.height
+        
         # Resize scroll view (result area)
         self.scroll_border_box.setHidden_(False)
         self.scroll_border_box.setFrame_(NSMakeRect(16, 132, 468, result_height))
         
-        # Resize container and panel
+        # Resize container
         self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, new_total_height))
         
-        # Resize panel window to match content
-        panel_frame = self.panel.frame()
+        # Resize panel window - keep top-left position fixed, grow downward
+        new_y = original_top - new_total_height
+        panel_frame.origin.y = new_y
         panel_frame.size.height = new_total_height
         self.panel.setFrame_display_(panel_frame, True)
-        
-        # ALWAYS reposition under status item after expanding
-        self.position_panel_under_status_item()
     
     def needs_web_search(self, query: str) -> bool:
         """
@@ -2316,127 +2480,129 @@ ANSWER:"""
         Process query with clipboard text context.
         NOW WITH RAG: Extracts key terms from BOTH query AND clipboard, searches web!
         
-        Args:
-            query: User's question/request
-            selected_text: Text from clipboard
         """
-        import threading
-        import re
-        
+
+        # Ensure input is editable and selectable
+        self.input_text_view.setEditable_(True)
+        self.input_text_view.setSelectable_(True)
+        # Avoid using field editor behavior inside menu panel (can interfere with rendering)
+        try:
+            self.input_text_view.setFieldEditor_(False)
+        except:
+            # If not available, ignore
+            pass
         def process_in_background():
-            try:
-                # STEP 1: Extract terms to search from BOTH query AND clipboard
-                query_lower = query.lower()
-                
-                # A. Extract specific terms from query (e.g., "what is FIPS 203")
-                query_terms_to_search = []
-                
-                # Pattern: "what is X", "explain X", "define X"
-                what_is_match = re.search(r'what\s+is\s+([A-Z0-9\s\-]+?)(?:\?|$|in)', query, re.IGNORECASE)
-                if what_is_match:
-                    query_terms_to_search.append(what_is_match.group(1).strip())
-                
-                explain_match = re.search(r'explain\s+([A-Z0-9\s\-]+?)(?:\?|$|in)', query, re.IGNORECASE)
-                if explain_match:
-                    query_terms_to_search.append(explain_match.group(1).strip())
-                
-                # B. Extract technical terms from clipboard
-                # Pattern 1: All-caps acronyms (BAKE, NIST, ML-KEM)
-                acronym_pattern = r'\b[A-Z][A-Z0-9\-]{2,15}\b'
-                clipboard_acronyms = list(set(re.findall(acronym_pattern, selected_text)))
-                
-                # Pattern 2: CAPS + numbers (FIPS 203, ISO 27001)
-                caps_num_pattern = r'\b[A-Z]+\s+\d{2,5}\b'
-                clipboard_standards = list(set(re.findall(caps_num_pattern, selected_text)))
-                
-                # Combine all technical terms
-                all_technical_terms = query_terms_to_search + clipboard_acronyms + clipboard_standards
-                all_technical_terms = list(set([t.strip() for t in all_technical_terms if len(t.strip()) > 1]))
-                
-                # DON'T add clipboard to RAG - causes pollution
-                # We'll use clipboard directly in context instead
-                
-                # STEP 2: Query RAG for relevant context (from previous knowledge only)
-                self.safe_update_result("💾 Searching local knowledge base...")
-                rag_result = self.rag.query(query, top_k=3, min_score=0.5)
-                
-                # Add web search results to RAG too
-                self.safe_update_result("🌐 Searching web for additional context...")
-                
-                # STEP 3: ALWAYS search web if we have technical terms OR explanatory query
-                needs_web = (all_technical_terms and len(all_technical_terms) > 0) or \
-                           any(word in query_lower for word in ['explain', 'what', 'define', 'meaning', 'describe'])
-                
-                if needs_web:
-                    # FORCE web search for better context - show brief preview
-                    if all_technical_terms:
-                        terms_preview = ', '.join(all_technical_terms[:5])
-                    else:
-                        # Show first 7-8 words of query
-                        words = query.split()[:8]
-                        terms_preview = ' '.join(words) + ('...' if len(query.split()) > 8 else '')
-                    self.safe_update_result(f"🔍 Searching: {terms_preview}...")
-                    
-                    # Build search terms: prioritize extracted terms
-                    all_search_results = []
-                    terms_to_search = []
-                    
-                    # Add query terms first
-                    if query_terms_to_search:
-                        terms_to_search.extend(query_terms_to_search[:2])
-                    
-                    # Add clipboard acronyms/standards
-                    if clipboard_acronyms:
-                        terms_to_search.extend(clipboard_acronyms[:2])
-                    if clipboard_standards:
-                        terms_to_search.extend(clipboard_standards[:2])
-                    
-                    # If still empty, use technical terms
-                    if not terms_to_search and all_technical_terms:
-                        terms_to_search = all_technical_terms[:3]
-                    
-                    # If STILL empty, use query itself
-                    if not terms_to_search:
-                        terms_to_search = [query]
-                    
-                    # Search for each term
-                    for term in terms_to_search[:4]:  # Limit to 4 searches
-                        try:
-                            # Search with context keywords
-                            search_query = f"{term} cryptography" if any(word in selected_text.lower() for word in ['crypto', 'security', 'key']) else term
-                            search_results = self.web_search.search(search_query, include_news=False)
-                            
-                            if search_results['sources_count'] > 0:
-                                all_search_results.extend(search_results['results'][:2])
-                                # Just show brief update, not full details
-                                term_preview = term[:30] + '...' if len(term) > 30 else term
-                                self.safe_update_result(f"🔍 {term_preview}")
-                        except Exception as e:
-                            print(f"Search failed for {term}: {e}")
-                    
-                    # Build comprehensive context
-                    from datetime import datetime
-                    current_date = datetime.now().strftime("%B %d, %Y")
-                    
-                    # Add web results to RAG for future reference
-                    if all_search_results:
-                        self.rag.add_web_results(all_search_results, query)
-                    
-                    web_context = ""
-                    if all_search_results:
-                        web_context = "\n\nWEB SEARCH RESULTS:\n"
-                        for i, res in enumerate(all_search_results[:6], 1):
-                            web_context += f"{i}. {res.title}\n   {res.snippet[:200]}...\n   Source: {res.source}\n\n"
-                    
-                    # Build RAG context
-                    rag_context = ""
-                    if rag_result['has_context']:
-                        rag_context = "\n\nKNOWLEDGE BASE:\n"
-                        for i, source in enumerate(rag_result['sources'], 1):
-                            rag_context += f"[{i}] {source['text'][:200]}... (score: {source['score']:.2f})\n\n"
-                    
-                    # Create COMPREHENSIVE prompt with RAG + Web + Clipboard
-                    enhanced_prompt = f"""CURRENT DATE: {current_date}
+            query_lower = query.lower()
+
+            # A. Extract specific terms from query (e.g., "what is FIPS 203")
+            query_terms_to_search = []
+
+            # Pattern: "what is X", "explain X", "define X"
+            what_is_match = re.search(r'what\s+is\s+([A-Z0-9\s\-]+?)(?:\?|$|in)', query, re.IGNORECASE)
+            if what_is_match:
+                query_terms_to_search.append(what_is_match.group(1).strip())
+
+            explain_match = re.search(r'explain\s+([A-Z0-9\s\-]+?)(?:\?|$|in)', query, re.IGNORECASE)
+            if explain_match:
+                query_terms_to_search.append(explain_match.group(1).strip())
+
+            # B. Extract technical terms from clipboard
+            # Pattern 1: All-caps acronyms (BAKE, NIST, ML-KEM)
+            acronym_pattern = r'\b[A-Z][A-Z0-9\-]{2,15}\b'
+            clipboard_acronyms = list(set(re.findall(acronym_pattern, selected_text)))
+
+            # Pattern 2: CAPS + numbers (FIPS 203, ISO 27001)
+            caps_num_pattern = r'\b[A-Z]+\s+\d{2,5}\b'
+            clipboard_standards = list(set(re.findall(caps_num_pattern, selected_text)))
+
+            # Combine all technical terms
+            all_technical_terms = query_terms_to_search + clipboard_acronyms + clipboard_standards
+            all_technical_terms = list(set([t.strip() for t in all_technical_terms if len(t.strip()) > 1]))
+
+            # DON'T add clipboard to RAG - causes pollution
+            # We'll use clipboard directly in context instead
+
+            # STEP 2: Query RAG for relevant context (from previous knowledge only)
+            self.safe_update_result("💾 Searching local knowledge base...")
+            rag_result = self.rag.query(query, top_k=3, min_score=0.5)
+
+            # Add web search results to RAG too
+            self.safe_update_result("🌐 Searching web for additional context...")
+
+            # STEP 3: ALWAYS search web if we have technical terms OR explanatory query
+            needs_web = (all_technical_terms and len(all_technical_terms) > 0) or \
+                       any(word in query_lower for word in ['explain', 'what', 'define', 'meaning', 'describe'])
+
+            if needs_web:
+                # FORCE web search for better context - show brief preview
+                if all_technical_terms:
+                    terms_preview = ', '.join(all_technical_terms[:5])
+                else:
+                    # Show first 7-8 words of query
+                    words = query.split()[:8]
+                    terms_preview = ' '.join(words) + ('...' if len(query.split()) > 8 else '')
+                self.safe_update_result(f"🔍 Searching: {terms_preview}...")
+
+                # Build search terms: prioritize extracted terms
+                all_search_results = []
+                terms_to_search = []
+
+                # Add query terms first
+                if query_terms_to_search:
+                    terms_to_search.extend(query_terms_to_search[:2])
+
+                # Add clipboard acronyms/standards
+                if clipboard_acronyms:
+                    terms_to_search.extend(clipboard_acronyms[:2])
+                if clipboard_standards:
+                    terms_to_search.extend(clipboard_standards[:2])
+
+                # If still empty, use technical terms
+                if not terms_to_search and all_technical_terms:
+                    terms_to_search = all_technical_terms[:3]
+
+                # If STILL empty, use query itself
+                if not terms_to_search:
+                    terms_to_search = [query]
+
+                # Search for each term
+                for term in terms_to_search[:4]:  # Limit to 4 searches
+                    try:
+                        # Search with context keywords
+                        search_query = f"{term} cryptography" if any(word in selected_text.lower() for word in ['crypto', 'security', 'key']) else term
+                        search_results = self.web_search.search(search_query, include_news=False)
+
+                        if search_results['sources_count'] > 0:
+                            all_search_results.extend(search_results['results'][:2])
+                            # Just show brief update, not full details
+                            term_preview = term[:30] + '...' if len(term) > 30 else term
+                            self.safe_update_result(f"🔍 {term_preview}")
+                    except Exception as e:
+                        print(f"Search failed for {term}: {e}")
+
+                # Build comprehensive context
+                from datetime import datetime
+                current_date = datetime.now().strftime("%B %d, %Y")
+
+                # Add web results to RAG for future reference
+                if all_search_results:
+                    self.rag.add_web_results(all_search_results, query)
+
+                web_context = ""
+                if all_search_results:
+                    web_context = "\n\nWEB SEARCH RESULTS:\n"
+                    for i, res in enumerate(all_search_results[:6], 1):
+                        web_context += f"{i}. {res.title}\n   {res.snippet[:200]}...\n   Source: {res.source}\n\n"
+
+                # Build RAG context
+                rag_context = ""
+                if rag_result['has_context']:
+                    rag_context = "\n\nKNOWLEDGE BASE:\n"
+                    for i, source in enumerate(rag_result['sources'], 1):
+                        rag_context += f"[{i}] {source['text'][:200]}... (score: {source['score']:.2f})\n\n"
+
+                # Create COMPREHENSIVE prompt with RAG + Web + Clipboard
+                enhanced_prompt = f"""CURRENT DATE: {current_date}
 
 QUESTION: {query}
 
@@ -2456,33 +2622,33 @@ INSTRUCTIONS:
 
 ANSWER:"""
 
-                    sources_found = len(all_search_results) + len(rag_result['sources'])
-                    self.safe_update_result(f"✅ Found {sources_found} total sources (RAG: {len(rag_result['sources'])}, Web: {len(all_search_results)})\n🧠 Generating comprehensive answer...")
-                    
-                    # Increase max_tokens for comprehensive answer
-                    result = self.brain.ask(enhanced_prompt, mode="balanced", max_tokens=800)
-                    try:
-                        from src.brain.tools_gemini import LAST_USED_MODEL
-                        print(f"Model used (RAG+Web comprehensive): {LAST_USED_MODEL}")
-                    except Exception:
-                        pass
-                    try:
-                        from src.brain.tools_gemini import LAST_USED_MODEL
-                        print(f"Model used (RAG+Web): {LAST_USED_MODEL}")
-                    except Exception:
-                        pass
-                    
-                    # Add sources
-                    if all_search_results:
-                        sources_text = "\n\n📚 Sources:\n"
-                        for i, res in enumerate(all_search_results[:6], 1):
-                            sources_text += f"{i}. {res.title} ({res.source})\n"
-                        result += sources_text
-                    
-                    self.safe_update_result(result)
-                else:
-                    # Simple context query - no web search needed
-                    enhanced_prompt = f"""QUESTION: {query}
+                sources_found = len(all_search_results) + len(rag_result['sources'])
+                self.safe_update_result(f"✅ Found {sources_found} total sources (RAG: {len(rag_result['sources'])}, Web: {len(all_search_results)})\n🧠 Generating comprehensive answer...")
+
+                # Increase max_tokens for comprehensive answer
+                result = self.brain.ask(enhanced_prompt, mode="balanced", max_tokens=800)
+                try:
+                    from src.brain.tools_gemini import LAST_USED_MODEL
+                    print(f"Model used (RAG+Web comprehensive): {LAST_USED_MODEL}")
+                except Exception:
+                    pass
+                try:
+                    from src.brain.tools_gemini import LAST_USED_MODEL
+                    print(f"Model used (RAG+Web): {LAST_USED_MODEL}")
+                except Exception:
+                    pass
+
+                # Add sources
+                if all_search_results:
+                    sources_text = "\n\n📚 Sources:\n"
+                    for i, res in enumerate(all_search_results[:6], 1):
+                        sources_text += f"{i}. {res.title} ({res.source})\n"
+                    result += sources_text
+
+                self.safe_update_result(result)
+            else:
+                # Simple context query - no web search needed
+                enhanced_prompt = f"""QUESTION: {query}
 
 SELECTED TEXT:
 {selected_text[:4000]}
@@ -2491,20 +2657,15 @@ Please answer the question about the selected text above. Be clear, detailed, an
 
 ANSWER:"""
 
-                    self.safe_update_result("🧠 Analyzing with AI...")
-                    result = self.brain.ask(enhanced_prompt, mode="balanced", max_tokens=600)
-                    try:
-                        from src.brain.tools_gemini import LAST_USED_MODEL
-                        print(f"Model used (Simple context): {LAST_USED_MODEL}")
-                    except Exception:
-                        pass
-                    self.safe_update_result(result)
-                
-            except Exception as e:
-                import traceback
-                error_msg = f"❌ Error: {str(e)}\n\n{traceback.format_exc()}"
-                self.safe_update_result(error_msg)
-        
+                self.safe_update_result("🧠 Analyzing with AI...")
+                result = self.brain.ask(enhanced_prompt, mode="balanced", max_tokens=600)
+                try:
+                    from src.brain.tools_gemini import LAST_USED_MODEL
+                    print(f"Model used (Simple context): {LAST_USED_MODEL}")
+                except Exception:
+                    pass
+                self.safe_update_result(result)
+
         # Run in background thread
         thread = threading.Thread(target=process_in_background)
         thread.daemon = True
@@ -2513,6 +2674,18 @@ ANSWER:"""
     def safe_update_result(self, text):
         """Safely update result view from any thread"""
         # Ensure UI updates happen on the main thread (use performSelectorOnMainThread)
+        # Filter noisy messages that shouldn't appear in the result box
+        try:
+            if isinstance(text, str) and 'Panel repositioned' in text:
+                return
+        except Exception:
+            pass
+        # Suppress background updates during quick UI transitions (allow main thread updates)
+        try:
+            if getattr(self, '_suppress_bg_updates', False) and threading.current_thread().name != 'MainThread':
+                return
+        except Exception:
+            pass
         try:
             # Use performSelectorOnMainThread to safely update UI
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
