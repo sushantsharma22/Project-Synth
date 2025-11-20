@@ -20,8 +20,10 @@ import signal
 from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem,
                     NSTextField, NSButton, NSView, NSColor, NSFont,
                     NSNotificationCenter, NSUserNotification, NSUserNotificationCenter,
-                    NSTextView, NSScrollView, NSPasteboard, NSApp, NSBox)
-from Foundation import NSObject, NSMakeRect, NSMakeSize
+                    NSTextView, NSScrollView, NSPasteboard, NSApp, NSBox, NSPanel,
+                    NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel,
+                    NSBackingStoreBuffered, NSStatusWindowLevel)
+from Foundation import NSObject, NSMakeRect, NSMakeSize, NSPoint
 import objc
 from typing import Any, cast
 from src.brain.tools_gemini import web_search_tavily
@@ -42,6 +44,7 @@ NSColor: Any = NSColor
 NSFont: Any = NSFont
 NSPasteboard: Any = NSPasteboard
 NSApp: Any = NSApp
+NSPanel: Any = NSPanel
 NSUserNotification: Any = NSUserNotification
 NSUserNotificationCenter: Any = NSUserNotificationCenter
 
@@ -326,20 +329,77 @@ class CopyableTextView(NSTextView):
         try:
             modifierFlags = event.modifierFlags()
             characters = event.charactersIgnoringModifiers()
+            if characters:
+                try:
+                    characters = characters.lower()
+                except:
+                    pass
             # Command key mask (1 << 20)
             if modifierFlags & (1 << 20):
                 if characters == 'c':
-                    self.copy_(None)
-                    return True
+                    # Prefer copying from the window first responder if it's not this view
+                    try:
+                        w = self.window()
+                        if w:
+                            fr = w.firstResponder()
+                            if fr is not None and fr is not self and hasattr(fr, 'copy_'):
+                                try:
+                                    fr.copy_(None)
+                                    return True
+                                except:
+                                    pass
+                    except Exception:
+                        pass
+                    # Fallback: copy from this view
+                    try:
+                        self.copy_(None)
+                        return True
+                    except:
+                        pass
                 elif characters == 'v':
-                    self.paste_(None)
-                    return True
+                    # If this view is editable, paste here; otherwise try forwarding to window first responder
+                    try:
+                        if getattr(self, 'isEditable') and self.isEditable():
+                            self.paste_(None)
+                            return True
+                        else:
+                            w = self.window()
+                            if w:
+                                fr = w.firstResponder()
+                                if fr and hasattr(fr, 'paste_'):
+                                    try:
+                                        fr.paste_(None)
+                                        return True
+                                    except:
+                                        pass
+                    except Exception:
+                        pass
                 elif characters == 'x':
-                    self.cut_(None)
-                    return True
+                    try:
+                        if getattr(self, 'isEditable') and self.isEditable():
+                            self.cut_(None)
+                            return True
+                    except:
+                        pass
                 elif characters == 'a':
-                    self.selectAll_(None)
-                    return True
+                    # Forward selectAll to first responder if possible
+                    try:
+                        w = self.window()
+                        if w:
+                            fr = w.firstResponder()
+                            if fr is not None and fr is not self and hasattr(fr, 'selectAll_'):
+                                try:
+                                    fr.selectAll_(None)
+                                    return True
+                                except:
+                                    pass
+                    except Exception:
+                        pass
+                    try:
+                        self.selectAll_(None)
+                        return True
+                    except:
+                        pass
         except Exception as e:
             print(f"Keyboard shortcut error: {e}")
         # Let parent handle other shortcuts
@@ -356,10 +416,22 @@ class CopyableTextView(NSTextView):
         """Handle copy in menu bar context"""
         try:
             selectedRange = self.selectedRange()
-            
+
+            # selectedRange can be an NSObject with .location/.length or a tuple (loc, length)
+            try:
+                loc = int(selectedRange.location)
+                length = int(selectedRange.length)
+            except Exception:
+                try:
+                    loc, length = selectedRange
+                    loc = int(loc); length = int(length)
+                except Exception:
+                    # Fallback - no selection
+                    loc, length = 0, 0
+
             # Get selected text or all text
-            if selectedRange.length > 0:
-                text = self.string()[selectedRange.location:selectedRange.location + selectedRange.length]
+            if length > 0:
+                text = self.string()[loc: loc + length]
             else:
                 text = self.string()
             
@@ -373,7 +445,7 @@ class CopyableTextView(NSTextView):
                 if not success:
                     pasteboard.setString_forType_(text, "NSStringPboardType")
                 
-                print(f"✅ Copied {len(text)} chars to clipboard")
+                # copied to clipboard (silent)
                 return True
             else:
                 print("⚠️ No text to copy")
@@ -400,12 +472,13 @@ class CopyableTextView(NSTextView):
                 # Clear placeholder
                 if getattr(self, '_is_placeholder', False):
                     self.setString_("")
+                    self.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))
                     self._is_placeholder = False
                 
                 # Insert text at cursor position
                 selectedRange = self.selectedRange()
                 
-                # Use insertText_ which ALWAYS works (even in menus)
+                # Use insertText_ which inserts into the view
                 self.insertText_(text)
                 
                 # Trigger callback
@@ -416,7 +489,7 @@ class CopyableTextView(NSTextView):
                 except:
                     pass
                 
-                print(f"✅ Pasted {len(text)} chars")
+                # pasted into view (silent)
                 return True
             else:
                 print("⚠️ No text in clipboard")
@@ -430,9 +503,15 @@ class CopyableTextView(NSTextView):
     
     def selectAll_(self, sender):
         """Select all text - works with Cmd+A"""
-        length = len(self.string())
-        self.setSelectedRange_((0, length))
-        return True
+        try:
+            length = len(self.string())
+            self.setSelectedRange_((0, length))
+            # selection updated
+            self.setNeedsDisplay_(True)
+            return True
+        except Exception as e:
+            print(f"⚠️ selectAll_ error: {e}")
+            return False
     
     def cut_(self, sender):
         """Cut text - works with Cmd+X"""
@@ -466,64 +545,65 @@ class InputTextView(CopyableTextView):
     This shows a caret inside the menu and handles paste/keyboard properly.
     """
     def insertText_(self, text):
-        """Insert text and FORCE cursor to stay visible"""
+        """Insert text and make it visible"""
         # Clear placeholder when actual text is inserted
         try:
             if getattr(self, '_is_placeholder', False):
                 self.setString_("")
+                self.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))
                 self._is_placeholder = False
         except Exception:
             pass
+        
         # Prevent inserting newlines; convert them to spaces
         if isinstance(text, str) and '\n' in text:
             text = text.replace('\n', ' ')
+        
+        # Manual text insertion (parent class doesn't work in menu bar)
+        current_text = str(self.string())
+        selected_range = self.selectedRange()
+        
+        # Build new text
+        before = current_text[:selected_range.location]
+        after = current_text[selected_range.location + selected_range.length:]
+        new_text = before + text + after
+        
+        # Set new text
+        self.setString_(new_text)
+        
+        # Move cursor to end of inserted text
+        new_position = selected_range.location + len(text)
+        self.setSelectedRange_((new_position, 0))
+        
+        # Force display update
+        self.setNeedsDisplay_(True)
+        
+        # Invoke text change callback if present
         try:
-            # Call parent to insert text
-            ret = objc.super(InputTextView, self).insertText_(text)
-            # ⭐ CRITICAL: Force cursor to stay visible after text insertion
-            try:
-                self.updateInsertionPointStateAndRestartTimer_(True)
-                self.setNeedsDisplay_(True)
-            except:
-                pass
-            # Invoke text change callback if present
-            try:
-                cb = getattr(self, 'on_text_change_callback', None)
-                if cb:
-                    cb()
-            except Exception:
-                pass
-            return ret
+            cb = getattr(self, 'on_text_change_callback', None)
+            if cb:
+                cb()
         except Exception:
-            # Fallback - call super on CopyableTextView
-            ret = objc.super(CopyableTextView, self).insertText_(text)
-            # ⭐ Force cursor update in fallback too
-            try:
-                self.updateInsertionPointStateAndRestartTimer_(True)
-                self.setNeedsDisplay_(True)
-            except:
-                pass
-            try:
-                cb = getattr(self, 'on_text_change_callback', None)
-                if cb:
-                    cb()
-            except Exception:
-                pass
-            return ret
+            pass
 
     def keyDown_(self, event):
-        # Called for typing events - clear placeholder if set
+        """Handle key press events"""
+        # Clear placeholder when typing
         try:
             if getattr(self, '_is_placeholder', False):
                 self.setString_("")
+                self.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))
                 self._is_placeholder = False
         except Exception:
             pass
-        # Detect Enter/Return
+        
+        # Get key character
         try:
             chars = event.characters() if hasattr(event, 'characters') else event.charactersIgnoringModifiers()
         except Exception:
             chars = None
+        
+        # Handle Enter/Return
         if chars and (chars == '\r' or chars == '\n'):
             try:
                 cb = getattr(self, 'on_enter_callback', None)
@@ -532,20 +612,25 @@ class InputTextView(CopyableTextView):
                     return None
             except Exception:
                 pass
-        ret = objc.super(InputTextView, self).keyDown_(event)
+        
+        # Call parent to handle normal typing
+        objc.super(InputTextView, self).keyDown_(event)
+        
+        # Trigger callback
         try:
             cb = getattr(self, 'on_text_change_callback', None)
             if cb:
                 cb()
         except Exception:
             pass
-        return ret
 
     def setPlaceholder_(self, placeholder):
         # NSTextView doesn't have a native placeholder; we simply use setString_ if it's empty
         try:
             if not self.string() or self.string().strip() == '':
                 self.setString_(placeholder)
+                # Set placeholder color (lighter gray)
+                self.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.5, 0.5, 0.55, 0.7))
                 # Use a flag to indicate this is placeholder text so it can be cleared on focus
                 self._is_placeholder = True
         except Exception:
@@ -556,29 +641,11 @@ class InputTextView(CopyableTextView):
         try:
             if getattr(self, '_is_placeholder', False):
                 self.setString_("")
+                self.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))
                 self._is_placeholder = False
         except Exception:
             pass
 
-    def paste_(self, sender):
-        """Simplified paste - let parent class handle it"""
-        # Clear placeholder before pasting
-        try:
-            if getattr(self, '_is_placeholder', False):
-                self.setString_("")
-                self._is_placeholder = False
-        except:
-            pass
-        # Call parent's paste method (CopyableTextView)
-        result = objc.super(InputTextView, self).paste_(sender)
-        # Trigger callback
-        try:
-            cb = getattr(self, 'on_text_change_callback', None)
-            if cb:
-                cb()
-        except:
-            pass
-        return result
 
 
 class CopyableTextField(NSTextField):
@@ -596,6 +663,11 @@ class CopyableTextField(NSTextField):
         """Handle common command key equivalents: copy/paste/cut/select all."""
         modifierFlags = event.modifierFlags()
         characters = event.charactersIgnoringModifiers()
+        if characters:
+            try:
+                characters = characters.lower()
+            except:
+                pass
 
         # 1<<20 is the NSCommandKeyMask in older headers, use it consistently
         if modifierFlags & (1 << 20):
@@ -637,6 +709,80 @@ class CopyableTextField(NSTextField):
 # Now using CopyableTextField directly with native NSTextField methods (stringValue/setStringValue_)
 
 
+class SynthPanel(NSPanel):
+    """Custom NSPanel that acts as a pinned popover window (like Spotlight/Siri)"""
+    
+    def init(self):
+        """Initialize the panel with custom configuration"""
+        # Define style mask: borderless + non-activating panel
+        style_mask = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        
+        # Create panel with compact default size (500x190)
+        content_rect = NSMakeRect(0, 0, 500, 190)
+        self = objc.super(SynthPanel, self).initWithContentRect_styleMask_backing_defer_(
+            content_rect,
+            style_mask,
+            NSBackingStoreBuffered,
+            False
+        )
+        
+        if self is None:
+            return None
+        
+        # Set window level to appear over full-screen apps (like Spotlight)
+        self.setLevel_(NSStatusWindowLevel)
+        
+        # Glassmorphism: semi-transparent background with blur (more opaque)
+        bg_color = NSColor.colorWithRed_green_blue_alpha_(0.12, 0.12, 0.15, 0.92)  # More opaque
+        self.setBackgroundColor_(bg_color)
+        self.setOpaque_(False)  # Allow transparency
+        
+        # Add blur effect (vibrancy)
+        try:
+            from AppKit import NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow, NSVisualEffectMaterialHUDWindow
+            effect_view = NSVisualEffectView.alloc().initWithFrame_(content_rect)
+            effect_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+            effect_view.setMaterial_(NSVisualEffectMaterialHUDWindow)
+            effect_view.setState_(1)  # Active
+            self.setContentView_(effect_view)
+        except:
+            pass
+        
+        # Add rounded corners and subtle shadow with proper clipping
+        try:
+            self.contentView().setWantsLayer_(True)
+            self.contentView().layer().setCornerRadius_(20.0)  # More rounded edges
+            self.contentView().layer().setMasksToBounds_(True)  # Clip to rounded corners
+            self.contentView().layer().setShadowColor_(NSColor.blackColor().CGColor())
+            self.contentView().layer().setShadowOpacity_(0.5)
+            self.contentView().layer().setShadowOffset_(NSMakeSize(0, -4))
+            self.contentView().layer().setShadowRadius_(12.0)
+            # Add blue border
+            self.contentView().layer().setBorderWidth_(1.5)  # Thinner border
+            self.contentView().layer().setBorderColor_(NSColor.colorWithRed_green_blue_alpha_(0.3, 0.6, 1.0, 0.5).CGColor())  # More subtle
+        except:
+            pass
+        
+        # Don't hide on deactivate - we'll handle closing manually
+        self.setHidesOnDeactivate_(False)
+        
+        # Make panel movable by dragging anywhere
+        self.setMovableByWindowBackground_(True)
+        
+        # Allow panel to become key window (for keyboard input)
+        self.setAcceptsMouseMovedEvents_(True)
+        
+        return self
+    
+    def canBecomeKeyWindow(self):
+        """Allow panel to become key window for keyboard input"""
+        return True
+    
+    def canBecomeMainWindow(self):
+        """Allow panel to become main window"""
+        return True
+
+
 class SynthMenuBarNative(NSObject):
     """Native macOS menu bar with embedded text input"""
     
@@ -668,11 +814,14 @@ class SynthMenuBarNative(NSObject):
         # Chat Mode State
         self.chat_mode_active = False
         
+        # Event monitor for click-outside-to-close
+        self.click_monitor = None
+        
         # UI sizing + layout guard rails
         self.default_width = 500
         self.default_result_height = 195
         self.max_result_height = 700  # Increased to 700px for longer conversations
-        self.compact_height = 160  # Increased to fit 6 buttons (2 rows)
+        self.compact_height = 190  # Compact height for 6 buttons (2 rows)
         self.current_result_height = self.default_result_height
         self.menu_open = False
         # fallback hook for text change callback when textfield doesn't support attribute writes
@@ -691,57 +840,64 @@ class SynthMenuBarNative(NSObject):
         self.statusitem = self.statusbar.statusItemWithLength_(-1)  # Variable width
         self.statusitem.setTitle_("Synth")
         
-        # Create menu
-        self.menu = NSMenu.alloc().init()
-        self.menu.setDelegate_(self)
+        # Create custom panel (replaces NSMenu)
+        self.panel = SynthPanel.alloc().init()
         
         # Create custom view with text field
         self.create_input_view()
         
-        # Add menu items
-        self.build_menu()
+        # Set content view
+        self.panel.setContentView_(self.input_view)
         
-        # Default to compact view until a result is shown
-        self.reset_to_compact_view()
+        # Set action to toggle panel
+        self.statusitem.setAction_("togglePanel:")
+        self.statusitem.setTarget_(self)
         
-        # Set menu to status item
-        self.statusitem.setMenu_(self.menu)
+        # Create Edit menu for Copy/Paste support (CRITICAL for text editing)
+        self.create_edit_menu()
         
         return self
     
     def create_input_view(self):
         """Create custom view with embedded text field and result area"""
 
-        # Container view
-        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self.default_width, 310))
+        # Container view - compact initial size (2 rows of buttons)
+        self.input_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self.default_width, 190))
         self.input_view.setWantsLayer_(True)
+        
+        # Glassmorphism background
+        try:
+            self.input_view.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
+        except:
+            pass
 
-        # Layout constants
-        padding = 10
-        inner_width = self.default_width - (padding * 2)  # 480 for default_width 500
+        # Layout constants - better spacing
+        padding = 16
+        inner_width = self.default_width - (padding * 2)  # 468 for default_width 500
         result_view_height = self.default_result_height
-        # Border color used for both the result and input containers
-        border_color = NSColor.colorWithRed_green_blue_alpha_(0.45, 0.45, 0.50, 0.8)
+        
+        # Glassmorphism border color - subtle and elegant
+        border_color = NSColor.colorWithRed_green_blue_alpha_(0.3, 0.3, 0.35, 0.4)
 
         # ============ RESULT VIEW (TOP) - Scrollable output ============
         # Use NSBox for border, with scroll_view inside
-        border_box = NSBox.alloc().initWithFrame_(NSMakeRect(padding, 130, inner_width, result_view_height))
+        border_box = NSBox.alloc().initWithFrame_(NSMakeRect(padding, 132, inner_width, result_view_height))
         border_box.setBoxType_(4)  # NSBoxCustom
         border_box.setBorderType_(1)  # NSLineBorder
-        border_box.setBorderWidth_(1.5)
+        border_box.setBorderWidth_(0.5)  # Very thin border
         border_box.setBorderColor_(border_color)
-        border_box.setCornerRadius_(10.0)
-        border_box.setFillColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 1.0))
+        border_box.setCornerRadius_(18.0)  # More rounded
+        border_box.setFillColor_(NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.94))  # More opaque
 
         # Create scroll view INSIDE the border box
         scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, inner_width, result_view_height))
         scroll_view.setBorderType_(0)  # No border
         scroll_view.setDrawsBackground_(True)
-        scroll_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 1.0))
+        scroll_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.88))
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setHasHorizontalScroller_(False)
-        scroll_view.setAutohidesScrollers_(False)
-        scroll_view.setScrollerStyle_(1)
+        scroll_view.setAutohidesScrollers_(True)  # Auto-hide scrollers
+        scroll_view.setScrollerStyle_(1)  # Overlay style
         scroll_view.setVerticalScrollElasticity_(1)
         scroll_view.setAutoresizingMask_(2)
 
@@ -750,7 +906,7 @@ class SynthMenuBarNative(NSObject):
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
         self.result_view.setRichText_(False)
-        mono_font = NSFont.monospacedSystemFontOfSize_weight_(12, 0)
+        mono_font = NSFont.systemFontOfSize_(13)  # System font
         self.result_view.setFont_(mono_font)
         try:
             text_storage = self.result_view.textStorage()
@@ -758,9 +914,9 @@ class SynthMenuBarNative(NSObject):
             text_storage.addAttribute_value_range_("NSFont", mono_font, full_range)
         except:
             pass
-        self.result_view.textContainer().setLineFragmentPadding_(2.0)
-        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 1.0))
-        self.result_view.setTextColor_(NSColor.whiteColor())
+        self.result_view.textContainer().setLineFragmentPadding_(8.0)
+        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.88))
+        self.result_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))  # Bright white
         self.result_view.setAllowsUndo_(False)
         self.result_view.setVerticallyResizable_(True)
         self.result_view.setHorizontallyResizable_(False)
@@ -790,48 +946,79 @@ class SynthMenuBarNative(NSObject):
         self.scroll_view = scroll_view
         self.scroll_border_box = border_box
 
-        # ============ INPUT TEXT VIEW (MIDDLE) - Editable, direct view (NO scroll wrapper) ============
-        input_container_height = 50
-        input_container_y = 65
-        input_container = NSView.alloc().initWithFrame_(NSMakeRect(padding, input_container_y, inner_width, input_container_height))
-        input_container.setWantsLayer_(True)
+        # ============ INPUT TEXT VIEW (MIDDLE) - Editable WITH SCROLL ============
+        input_container_height = 46
+        input_container_y = 78  # Between button rows
+        self.input_container = NSView.alloc().initWithFrame_(NSMakeRect(padding, input_container_y, inner_width, input_container_height))
+        self.input_container.setWantsLayer_(True)
         try:
-            input_container.layer().setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.17, 1.0).CGColor())
-            input_container.layer().setBorderWidth_(1.5)
-            input_container.layer().setBorderColor_(border_color.CGColor())
-            input_container.layer().setCornerRadius_(10.0)
-            input_container.layer().setMasksToBounds_(True)
+            # Glassmorphism input - black, not blue
+            self.input_container.layer().setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.94).CGColor())  # More opaque
+            self.input_container.layer().setBorderWidth_(1.0)  # More visible border
+            self.input_container.layer().setBorderColor_(border_color.CGColor())
+            self.input_container.layer().setCornerRadius_(12.0)  # Properly rounded
+            self.input_container.layer().setMasksToBounds_(True)
         except:
             pass
-        input_padding = 8
-        self.input_text_view = InputTextView.alloc().initWithFrame_(NSMakeRect(input_padding, input_padding, inner_width - (input_padding * 2), input_container_height - (input_padding * 2)))
+        
+        # Create scroll view for input (allows horizontal scrolling for long text)
+        input_padding = 2
+        input_scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(input_padding, input_padding, inner_width - (input_padding * 2), input_container_height - (input_padding * 2)))
+        input_scroll_view.setBorderType_(0)  # No border
+        input_scroll_view.setDrawsBackground_(False)
+        input_scroll_view.setHasVerticalScroller_(False)  # No vertical scroll
+        input_scroll_view.setHasHorizontalScroller_(True)  # Horizontal scroll
+        input_scroll_view.setAutohidesScrollers_(True)
+        input_scroll_view.setScrollerStyle_(1)  # Overlay style
+        input_scroll_view.setHorizontalScrollElasticity_(1)
+        
+        # Input text view inside scroll view - horizontal layout with center-left cursor
+        self.input_text_view = InputTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 10000, input_container_height - 10))
         self.input_text_view.setEditable_(True)
         self.input_text_view.setSelectable_(True)
         self.input_text_view.setRichText_(False)
-        self.input_text_view.setFont_(NSFont.fontWithName_size_("Menlo", 13))
-        self.input_text_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.17, 1.0))
-        self.input_text_view.setTextColor_(NSColor.whiteColor())
-        self.input_text_view.setInsertionPointColor_(NSColor.whiteColor())
+        self.input_text_view.setFont_(NSFont.systemFontOfSize_(14))
+        self.input_text_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.88))  # Less transparent
+        self.input_text_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))
+        self.input_text_view.setInsertionPointColor_(NSColor.colorWithRed_green_blue_alpha_(0.3, 0.7, 1.0, 1.0))  # Bright blue cursor
         try:
-            self.input_text_view.setInsertionPointWidth_(3.0)
+            self.input_text_view.setInsertionPointWidth_(2.5)
         except:
             pass
         self.input_text_view.setDrawsBackground_(True)
+        self.input_text_view.setVerticallyResizable_(False)  # No vertical resize
+        self.input_text_view.setHorizontallyResizable_(True)  # Horizontal resize
+        # Center cursor vertically by adjusting textContainerInset
+        self.input_text_view.setTextContainerInset_(NSMakeSize(12, 11))  # 12px left padding, 11px top padding for vertical centering
+        
+        # Store references for focus handling
+        self.placeholder_text = "Ask Synth"
+        self.showing_placeholder = True
+        
+        # Store border color for focus effect
+        self.default_border_color = border_color
+        self.focus_border_color = NSColor.colorWithRed_green_blue_alpha_(0.3, 0.7, 1.0, 0.9)  # Bright blue border on focus
         try:
             self.input_text_view.setAutomaticTextReplacementEnabled_(False)
             self.input_text_view.setAutomaticQuoteSubstitutionEnabled_(False)
         except:
             pass
         try:
-            self.input_text_view.textContainer().setWidthTracksTextView_(True)
-            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(inner_width - 20, 10000000))
-            self.input_text_view.textContainer().setLineFragmentPadding_(4.0)
+            # Horizontal scroll setup - text goes in one line
+            self.input_text_view.textContainer().setWidthTracksTextView_(False)
+            self.input_text_view.textContainer().setHeightTracksTextView_(True)
+            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(10000000, input_container_height - 10))
         except:
             pass
-        self.input_text_view.setPlaceholder_("Ask Synth anything...")
+        self.input_text_view.setPlaceholder_("Ask Synth")
         self.input_text_view.on_enter_callback = self.handleInputEnter
-        input_container.addSubview_(self.input_text_view)
-        self.input_container = input_container
+        
+        # Add text view to scroll view
+        input_scroll_view.setDocumentView_(self.input_text_view)
+        
+        # Add scroll view to container
+        self.input_container.addSubview_(input_scroll_view)
+        self.input_scroll_view = input_scroll_view
 
         def handleQuery_(self, sender):
             """Handle ASK button - Fast intelligent agent with Live Tools"""
@@ -883,103 +1070,87 @@ class SynthMenuBarNative(NSObject):
             thread.daemon = True
             thread.start()
         
-        try:
-            self.input_text_view.setAutomaticTextReplacementEnabled_(False)
-            self.input_text_view.setAutomaticQuoteSubstitutionEnabled_(False)
-        except:
-            pass
-        
-        try:
-            # Word wrap for input
-            self.input_text_view.textContainer().setWidthTracksTextView_(True)
-            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(inner_width - 20, 10000000))  # Match result_view width
-            self.input_text_view.textContainer().setLineFragmentPadding_(4.0)  # Balanced spacing
-        except:
-            pass
-        
-        # Set placeholder
-        self.input_text_view.setPlaceholder_("Ask Synth anything...")
-        
-        # Set callback for Enter key
-        self.input_text_view.on_enter_callback = self.handleInputEnter
-        
-        # Add input to container
-        input_container.addSubview_(self.input_text_view)
         # Ensure input is editable and selectable
         self.input_text_view.setEditable_(True)
         self.input_text_view.setSelectable_(True)
-        # Enable standard edit menu and proper text handling
-        self.input_text_view.setUsesFontPanel_(True)  # Allow font changes
-        self.input_text_view.setRichText_(False)  # Keep plain text
-        # ⭐ CRITICAL: Enable automatic menu items for copy/paste
+        # Avoid using field editor behavior inside menu panel (can interfere with rendering)
         try:
+            self.input_text_view.setFieldEditor_(True)
+        except:
+            # If not available, ignore
+            pass
+        self.input_text_view.setRichText_(False)  # Keep plain text
+        # Enable standard edit operations
+        try:
+            self.input_text_view.setUsesFontPanel_(False)
             self.input_text_view.setAutomaticTextCompletionEnabled_(False)
             self.input_text_view.setAutomaticLinkDetectionEnabled_(False)
+            self.input_text_view.setAutomaticQuoteSubstitutionEnabled_(False)
+            self.input_text_view.setAutomaticDashSubstitutionEnabled_(False)
         except:
             pass
-        # Force acceptsFirstResponder to always return True
-        def custom_accepts_first_responder():
-            return True
-        self.input_text_view.acceptsFirstResponder = custom_accepts_first_responder
 
         # ============ 5 BUTTONS (ROW 1) ============
-        btn_spacing = 6
+        btn_spacing = 8  # Better gap between buttons
         btn_count = 5
         btn_width = int((inner_width - (btn_spacing * (btn_count - 1))) / btn_count)
-        btn_y = 32
+        btn_y = 40  # Top row of buttons
+        btn_height = 30  # Taller buttons
         
-        # Button 1: Ask
-        self.ask_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding, btn_y, btn_width, 22))
-        self.ask_button.setTitle_("Ask")
-        self.ask_button.setBezelStyle_(4)
+        # Create styled buttons matching macOS style - no borders, hover effects only
+        def create_styled_button(frame, title, is_blue=False):
+            btn = NSButton.alloc().initWithFrame_(frame)
+            btn.setTitle_(title)
+            btn.setBezelStyle_(4)
+            btn.setFont_(NSFont.systemFontOfSize_weight_(13, 0.5))
+            btn.setWantsLayer_(True)
+            try:
+                btn.layer().setCornerRadius_(8.0)  # Rounded corners
+                btn.layer().setBorderWidth_(0)  # No border
+                if is_blue:
+                    # Blue button with solid background
+                    btn.layer().setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.25, 0.55, 1.0, 0.85).CGColor())
+                else:
+                    # Regular buttons with subtle gray background (macOS style)
+                    btn.layer().setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.2, 0.2, 0.22, 0.6).CGColor())
+            except:
+                pass
+            return btn
+        
+        # Button 1: Ask (BLUE)
+        self.ask_button = create_styled_button(NSMakeRect(padding, btn_y, btn_width, btn_height), "Ask", is_blue=True)
         self.ask_button.setTarget_(self)
         self.ask_button.setAction_("handleQuery:")
-        self.ask_button.setFont_(NSFont.systemFontOfSize_(11))
         
         # Button 2: Agent
-        self.agent_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding + (btn_width + btn_spacing) * 1, btn_y, btn_width, 22))
-        self.agent_button.setTitle_("🤖 Agent")
-        self.agent_button.setBezelStyle_(4)
+        self.agent_button = create_styled_button(NSMakeRect(padding + (btn_width + btn_spacing) * 1, btn_y, btn_width, btn_height), "🤖 Agent", is_blue=False)
         self.agent_button.setTarget_(self)
         self.agent_button.setAction_("handleAgentQuery:")
-        self.agent_button.setFont_(NSFont.systemFontOfSize_(11))
         
         # Button 3: Screen
-        self.screen_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding + (btn_width + btn_spacing) * 2, btn_y, btn_width, 22))
-        self.screen_button.setTitle_("📸 Screen")
-        self.screen_button.setBezelStyle_(4)
+        self.screen_button = create_styled_button(NSMakeRect(padding + (btn_width + btn_spacing) * 2, btn_y, btn_width, btn_height), "📸 Screen", is_blue=False)
         self.screen_button.setTarget_(self)
         self.screen_button.setAction_("handleScreen:")
-        self.screen_button.setFont_(NSFont.systemFontOfSize_(11))
         
         # Button 4: Copy
-        self.copy_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding + (btn_width + btn_spacing) * 3, btn_y, btn_width, 22))
-        self.copy_button.setTitle_("Copy")
-        self.copy_button.setBezelStyle_(4)
+        self.copy_button = create_styled_button(NSMakeRect(padding + (btn_width + btn_spacing) * 3, btn_y, btn_width, btn_height), "Copy", is_blue=False)
         self.copy_button.setTarget_(self)
         self.copy_button.setAction_("copyResults:")
-        self.copy_button.setFont_(NSFont.systemFontOfSize_(11))
         
         # Button 5: Clear
-        self.clear_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding + (btn_width + btn_spacing) * 4, btn_y, btn_width, 22))
-        self.clear_button.setTitle_("Clear")
-        self.clear_button.setBezelStyle_(4)
-        self.clear_button.setFont_(NSFont.systemFontOfSize_(11))
+        self.clear_button = create_styled_button(NSMakeRect(padding + (btn_width + btn_spacing) * 4, btn_y, btn_width, btn_height), "Clear", is_blue=False)
         self.clear_button.setTarget_(self)
         self.clear_button.setAction_("clearResults:")
 
         # ============ BUTTON 6 (ROW 2) - CHAT ============
-        chat_btn_y = 6
-        self.chat_button = NSButton.alloc().initWithFrame_(NSMakeRect(padding, chat_btn_y, inner_width, 22))
-        self.chat_button.setTitle_("💬 Chat")
-        self.chat_button.setBezelStyle_(4)
+        chat_btn_y = 6  # Bottom row
+        self.chat_button = create_styled_button(NSMakeRect(padding, chat_btn_y, inner_width, btn_height), "💬 Chat", is_blue=False)
         self.chat_button.setTarget_(self)
-        self.chat_button.setAction_("toggleChatMode:")  # FIXED: Toggle mode, not send message
-        self.chat_button.setFont_(NSFont.systemFontOfSize_(11))
+        self.chat_button.setAction_("toggleChatMode:")
         
         # Add all views
         self.input_view.addSubview_(border_box)
-        self.input_view.addSubview_(input_container)
+        self.input_view.addSubview_(self.input_container)
         self.input_view.addSubview_(self.ask_button)
         self.input_view.addSubview_(self.agent_button)
         self.input_view.addSubview_(self.screen_button)
@@ -987,87 +1158,182 @@ class SynthMenuBarNative(NSObject):
         self.input_view.addSubview_(self.clear_button)
         self.input_view.addSubview_(self.chat_button)
 
-        # Hidden by default
-        self.scroll_border_box.setHidden_(True)
+        # Show output window by default with welcome message
+        self.scroll_border_box.setHidden_(False)
+        self.safe_update_result("✨ Welcome to Synth\n\nAsk me anything!")
     
-    def build_menu(self):
-        """Build menu with embedded input view and settings"""
-        # Add custom view as menu item
-        view_item = NSMenuItem.alloc().init()
-        view_item.setView_(self.input_view)
-        self.menu.addItem_(view_item)
+    def create_edit_menu(self):
+        """Create Edit menu for Copy/Paste keyboard shortcuts (CRITICAL for panel text editing)"""
+        # Get main menu
+        main_menu = NSApp.mainMenu()
+        if main_menu is None:
+            main_menu = NSMenu.alloc().init()
+            NSApp.setMainMenu_(main_menu)
         
-        # Separator
-        self.menu.addItem_(NSMenuItem.separatorItem())
+        # Check if Edit menu already exists
+        for i in range(main_menu.numberOfItems()):
+            item = main_menu.itemAtIndex_(i)
+            if item and item.submenu() and item.submenu().title() == "Edit":
+                print("✅ Edit menu already exists")
+                return
         
-        # Settings submenu (3 dots equivalent) - WITH ACTIONS
-        settings_menu = NSMenu.alloc().init()
-        settings_menu.setTitle_("Settings")
+        # Create Edit menu
+        edit_menu = NSMenu.alloc().init()
+        edit_menu.setTitle_("Edit")
+        edit_menu.setAutoenablesItems_(True)
         
-        # Plugin features with CORRECT names matching actual plugin metadata
-        email_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📧 Email Plugin", "showPluginInfo:", "")
-        email_item.setTarget_(self)
-        email_item.setRepresentedObject_("email_plugin")
+        # Add standard edit menu items
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Undo", "undo:", "z")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Redo", "redo:", "Z")
+        edit_menu.addItem_(NSMenuItem.separatorItem())
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Cut", "cut:", "x")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Copy", "copy:", "c")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Paste", "paste:", "v")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Delete", "delete:", "")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Select All", "selectAll:", "a")
         
-        file_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📁 File Manager", "showPluginInfo:", "")
-        file_item.setTarget_(self)
-        file_item.setRepresentedObject_("file_management_plugin")
+        # Add Edit menu to main menu
+        edit_item = NSMenuItem.alloc().init()
+        edit_item.setSubmenu_(edit_menu)
+        main_menu.addItem_(edit_item)
         
-        web_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🔍 Web Search", "showPluginInfo:", "")
-        web_item.setTarget_(self)
-        web_item.setRepresentedObject_("web_search_plugin")
+        print("✅ Edit menu created with full copy/paste support")
+    
+    def togglePanel_(self, sender):
+        """Toggle panel visibility and ALWAYS position it under the status item (like Spotlight)"""
+        if self.panel.isVisible():
+            # Hide panel when clicking icon again
+            self.panel.orderOut_(None)
+            self.stop_click_monitor()
+        else:
+            # CRITICAL: ALWAYS reposition under Synth icon (ignore last position)
+            # This ensures panel appears under icon even if user dragged it elsewhere
+            self.position_panel_under_status_item()
+            
+            # Initialize placeholder if needed
+            if not hasattr(self, 'showing_placeholder'):
+                self.showing_placeholder = True
+                self.input_text_view.setString_(self.placeholder_text)
+                self.input_text_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.5, 0.5, 0.55, 0.6))
+            
+            # Activate and show panel
+            NSApp.activateIgnoringOtherApps_(True)
+            self.panel.makeKeyAndOrderFront_(None)
+            
+            # Start monitoring for clicks outside panel
+            self.start_click_monitor()
+            
+            # Focus input text view
+            try:
+                window = self.input_text_view.window()
+                if window:
+                    window.makeFirstResponder_(self.input_text_view)
+                    # Clear placeholder on focus
+                    if self.showing_placeholder:
+                        self.input_text_view.setString_("")
+                        self.input_text_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))
+                        self.showing_placeholder = False
+                    
+                    # Blue border on focus
+                    try:
+                        self.input_container.layer().setBorderColor_(self.focus_border_color.CGColor())
+                        self.input_container.layer().setBorderWidth_(1.5)
+                    except:
+                        pass
+                    
+                    # Move cursor to end
+                    text_length = len(str(self.input_text_view.string()))
+                    self.input_text_view.setSelectedRange_((text_length, 0))
+            except Exception as e:
+                print(f"⚠️ Error focusing input: {e}")
+    
+    def position_panel_under_status_item(self):
+        """Position panel centered under the status item - called EVERY time panel opens or expands"""
+        try:
+            # Get status item button
+            button = self.statusitem.button()
+            if button:
+                button_window = button.window()
+                
+                if button_window:
+                    button_frame = button_window.frame()
+                    
+                    # Get current panel size (may have changed due to content)
+                    panel_frame = self.panel.frame()
+                    panel_width = panel_frame.size.width
+                    panel_height = panel_frame.size.height
+                    button_width = button_frame.size.width
+                    
+                    # Calculate position: centered under button
+                    x = button_frame.origin.x - (panel_width / 2) + (button_width / 2)
+                    y = button_frame.origin.y - panel_height - 8  # 8px gap below button
+                    
+                    # CRITICAL: ALWAYS update position (ignore where user dragged it)
+                    self.panel.setFrameOrigin_(NSPoint(x, y))
+                    print(f"✅ Panel repositioned at ({x:.0f}, {y:.0f}) under Synth icon")
+                    return
+        except Exception as e:
+            print(f"⚠️ Error positioning panel: {e}")
         
-        code_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📊 Code Analyzer", "showPluginInfo:", "")
-        code_item.setTarget_(self)
-        code_item.setRepresentedObject_("code_doc_plugin")
+        # Fallback: center on screen near top
+        try:
+            screen = NSApp.mainScreen()
+            if screen:
+                screen_frame = screen.visibleFrame()
+                panel_frame = self.panel.frame()
+                x = (screen_frame.size.width - panel_frame.size.width) / 2
+                y = screen_frame.origin.y + screen_frame.size.height - panel_frame.size.height - 60
+                self.panel.setFrameOrigin_(NSPoint(x, y))
+                print(f"⚠️ Fallback: Panel centered on screen at ({x:.0f}, {y:.0f})")
+        except Exception as e:
+            print(f"❌ Failed to position panel: {e}")
+    
+    def start_click_monitor(self):
+        """Start monitoring for clicks outside the panel"""
+        from AppKit import NSEvent, NSEventMaskLeftMouseDown, NSEventMaskRightMouseDown
         
-        security_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🔐 Security Tools", "showPluginInfo:", "")
-        security_item.setTarget_(self)
-        security_item.setRepresentedObject_("security_plugin")
+        # Remove existing monitor if any
+        self.stop_click_monitor()
         
-        calc_item = settings_menu.addItemWithTitle_action_keyEquivalent_("🧮 Calculator", "showPluginInfo:", "")
-        calc_item.setTarget_(self)
-        calc_item.setRepresentedObject_("math_plugin")
+        def click_handler(event):
+            """Handle mouse clicks - close panel if click is outside"""
+            try:
+                # Get click location in screen coordinates
+                click_location = NSEvent.mouseLocation()
+                
+                # Get panel frame
+                panel_frame = self.panel.frame()
+                
+                # Check if click is inside panel
+                if not (panel_frame.origin.x <= click_location.x <= panel_frame.origin.x + panel_frame.size.width and
+                        panel_frame.origin.y <= click_location.y <= panel_frame.origin.y + panel_frame.size.height):
+                    # Click is outside panel - close it
+                    self.panel.orderOut_(None)
+                    self.stop_click_monitor()
+            except Exception as e:
+                print(f"⚠️ Click monitor error: {e}")
+            
+            # Return event so it's processed normally
+            return event
         
-        cal_item = settings_menu.addItemWithTitle_action_keyEquivalent_("📅 Calendar", "showPluginInfo:", "")
-        cal_item.setTarget_(self)
-        cal_item.setRepresentedObject_("calendar_plugin")
-        
-        git_item = settings_menu.addItemWithTitle_action_keyEquivalent_("💻 Git Helper", "showPluginInfo:", "")
-        git_item.setTarget_(self)
-        git_item.setRepresentedObject_("git_plugin")
-        
-        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "⚙️ Plugins & Settings", None, ""
+        # Monitor left and right mouse clicks globally
+        self.click_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown,
+            click_handler
         )
-        settings_item.setSubmenu_(settings_menu)
-        self.menu.addItem_(settings_item)
-        
-        # Separator
-        self.menu.addItem_(NSMenuItem.separatorItem())
-        
-        # Quick screen analysis
-        screen_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "📸 Quick Screen Analysis", "quickScreenAnalysis:", ""
-        )
-        screen_item.setTarget_(self)
-        self.menu.addItem_(screen_item)
+    
+    def stop_click_monitor(self):
+        """Stop monitoring for clicks outside the panel"""
+        if self.click_monitor:
+            from AppKit import NSEvent
+            NSEvent.removeMonitor_(self.click_monitor)
+            self.click_monitor = None
 
-    def menuWillOpen_(self, menu):
-        """Ensure layout is compact and prompt focused when the menu opens."""
-        self.menu_open = True
-        self.prepare_prompt_entry()
-
-    def menuDidClose_(self, menu):
-        """Normalize layout when the menu closes so it doesn't reopen huge."""
-        self.menu_open = False
-        if not str(self.result_view.string()).strip():
-            self.reset_to_compact_view()
+    # Panel visibility is now handled by togglePanel: method
+    # No need for menuWillOpen_/menuDidClose_ delegates
 
     def prepare_prompt_entry(self):
-        """Shrink layout if empty and focus the text field on the main thread."""
-        if not str(self.result_view.string()).strip():
-            self.reset_to_compact_view()
+        """Focus the text field on the main thread."""
         try:
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "focusTextField:", None, False
@@ -1076,7 +1342,7 @@ class SynthMenuBarNative(NSObject):
             print(f"⚠️ Unable to schedule prompt focus: {exc}")
 
     def focusTextField_(self, _):
-        """Selector helper that safely focuses the input text view."""
+        """Selector helper that safely focuses the input text view and handles placeholder."""
         try:
             window = self.input_text_view.window()
             if window is not None:
@@ -1085,6 +1351,19 @@ class SynthMenuBarNative(NSObject):
                 # Then make input first responder
                 success = window.makeFirstResponder_(self.input_text_view)
                 if success:
+                    # Clear placeholder when focused
+                    if self.showing_placeholder:
+                        self.input_text_view.setString_("")
+                        self.input_text_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95))
+                        self.showing_placeholder = False
+                    
+                    # Blue border on focus
+                    try:
+                        self.input_container.layer().setBorderColor_(self.focus_border_color.CGColor())
+                        self.input_container.layer().setBorderWidth_(1.5)
+                    except:
+                        pass
+                    
                     # Move cursor to end
                     try:
                         text_length = len(str(self.input_text_view.string()))
@@ -1104,6 +1383,17 @@ class SynthMenuBarNative(NSObject):
         self.scroll_border_box.setHidden_(True)
         self.current_result_height = 0
         self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, self.compact_height))
+        
+        # Resize panel to compact size
+        panel_frame = self.panel.frame()
+        panel_frame.size.height = self.compact_height
+        self.panel.setFrame_display_(panel_frame, True)
+        
+        # Restore placeholder if input is empty
+        if not str(self.input_text_view.string()).strip():
+            self.input_text_view.setString_(self.placeholder_text)
+            self.input_text_view.setTextColor_(NSColor.colorWithRed_green_blue_alpha_(0.5, 0.5, 0.55, 0.6))  # Gray placeholder
+            self.showing_placeholder = True
     
     def showPluginInfo_(self, sender):
         """Execute plugin action when clicked"""
@@ -1154,6 +1444,9 @@ The plugin will automatically activate when relevant to your query."""
         else:
             print("🔄 Cleared: Clipboard, Results, and Chat History")
             self.reset_to_compact_view()
+        
+        # ALWAYS reposition panel under Synth icon after clearing
+        self.position_panel_under_status_item()
         
         # Focus back on input so user can type immediately
         self.prepare_prompt_entry()
@@ -1215,7 +1508,6 @@ The plugin will automatically activate when relevant to your query."""
                             # Capture this text - user intentionally copied it
                             self.captured_clipboard = normalized
                             self.clipboard_timestamp = time.time()
-                            print(f"📋 Captured clipboard: {len(normalized)} chars")
                     
                     time.sleep(0.5)  # Check every 500ms
                 except Exception as e:
@@ -1251,7 +1543,6 @@ The plugin will automatically activate when relevant to your query."""
                 if len(normalized) >= self.clipboard_min_chars:
                     self.captured_clipboard = normalized
                     self.clipboard_timestamp = time.time()
-                    print(f"📋 Live clipboard fallback: {len(normalized)} chars")
                     return normalized
         except Exception as exc:
             print(f"⚠️ Live clipboard fallback failed: {exc}")
@@ -1349,7 +1640,6 @@ The plugin will automatically activate when relevant to your query."""
             # METHOD 2: Fallback - just read current clipboard
             clipboard_text = pasteboard.stringForType_("public.utf8-plain-text")
             if clipboard_text:
-                print(f"📋 Using clipboard text: {len(clipboard_text)} chars")
                 return clipboard_text
             
             return ""
@@ -1388,8 +1678,10 @@ The plugin will automatically activate when relevant to your query."""
             # In chat mode: Enter sends message AND CLEARS INPUT
             self.handleChat_(None)
         else:
-            # Normal mode: Enter triggers Ask button (input stays for editing)
+            # Normal mode: Enter triggers Ask button AND CLEARS INPUT
             self.handleQuery_(None)
+            # Clear input after sending
+            self.input_text_view.setString_("")
     
     
     def toggleChatMode_(self, sender):
@@ -1406,12 +1698,19 @@ The plugin will automatically activate when relevant to your query."""
             self.agent_button.setEnabled_(False)
             self.screen_button.setEnabled_(False)
             
-            # Change background to darker blue tint (chat mode indicator)
-            chat_bg_color = NSColor.colorWithRed_green_blue_alpha_(0.15, 0.18, 0.25, 0.98)
-            chat_result_bg = NSColor.colorWithRed_green_blue_alpha_(0.15, 0.18, 0.25, 0.95)
+            # Keep black background in chat mode - no blue tint
+            # Just slightly less transparent for better readability
+            chat_bg_color = NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.92)
+            chat_result_bg = NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.92)
             
             self.input_text_view.setBackgroundColor_(chat_bg_color)
             self.result_view.setBackgroundColor_(chat_result_bg)
+            
+            # Update container background too
+            try:
+                self.input_container.layer().setBackgroundColor_(chat_bg_color.CGColor())
+            except:
+                pass
             
             # Show chat mode message with clear instructions
             welcome_msg = """💬 Chat Mode Active
@@ -1447,12 +1746,18 @@ Ready to chat! What would you like to know?"""
             self.agent_button.setEnabled_(True)
             self.screen_button.setEnabled_(True)
             
-            # Restore original background colors
-            normal_input_bg = NSColor.colorWithRed_green_blue_alpha_(0.15, 0.16, 0.18, 0.98)
-            normal_result_bg = NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.95)
+            # Restore original background colors - black, not blue
+            normal_input_bg = NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.88)
+            normal_result_bg = NSColor.colorWithRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.88)
             
             self.input_text_view.setBackgroundColor_(normal_input_bg)
             self.result_view.setBackgroundColor_(normal_result_bg)
+            
+            # Restore container background too
+            try:
+                self.input_container.layer().setBackgroundColor_(normal_input_bg.CGColor())
+            except:
+                pass
             
             # Show exit message
             exit_msg = """✅ Exited Chat Mode
@@ -1478,6 +1783,10 @@ Use the buttons below for:
     def handleScreen_(self, sender):
         """Handle Screen button"""
         query = str(self.input_text_view.string()).strip()
+        
+        # Clear input text after Enter (show in output window instead)
+        if query:
+            self.input_text_view.setString_("")
         
         if not query:
             # If no query, just do screen analysis
@@ -1661,8 +1970,8 @@ Use the buttons below for:
         if not query:
             return
 
-        # DON'T clear input - let user see and edit it!
-        # self.input_text_view.setString_("")  # REMOVED - keep text for editing
+        # Clear input text after Enter (show in output window instead)
+        self.input_text_view.setString_("")
 
         # Show result area
         self.scroll_border_box.setHidden_(False)
@@ -1757,8 +2066,8 @@ Log file: logs/ask_button/ask_session_*.log"""
         if not query:
             return
 
-        # DON'T clear input - let user see and edit it!
-        # self.input_text_view.setString_("")  # REMOVED - keep text for editing
+        # Clear input text after Enter (show in output window instead)
+        self.input_text_view.setString_("")
 
         # Show result area
         self.scroll_border_box.setHidden_(False)
@@ -1795,16 +2104,24 @@ Log file: logs/ask_button/ask_session_*.log"""
     def expand_view_for_content(self, content_height):
         """Expand the view to fit content"""
         # Calculate new total height with guard rails
-        result_height = min(self.max_result_height, max(80, content_height))
-        new_total_height = result_height + 70
+        result_height = min(self.max_result_height, max(100, content_height))
+        new_total_height = result_height + 142  # Account for input + buttons (2 rows)
         self.current_result_height = result_height
         
         # Resize scroll view (result area)
         self.scroll_border_box.setHidden_(False)
-        self.scroll_border_box.setFrame_(NSMakeRect(10, 65, 480, result_height))
+        self.scroll_border_box.setFrame_(NSMakeRect(16, 132, 468, result_height))
         
-        # Resize container
+        # Resize container and panel
         self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, new_total_height))
+        
+        # Resize panel window to match content
+        panel_frame = self.panel.frame()
+        panel_frame.size.height = new_total_height
+        self.panel.setFrame_display_(panel_frame, True)
+        
+        # ALWAYS reposition under status item after expanding
+        self.position_panel_under_status_item()
     
     def needs_web_search(self, query: str) -> bool:
         """
