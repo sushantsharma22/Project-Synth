@@ -10,27 +10,28 @@ Modes:
 - agent_mode_full: Full autonomous mode with all 49 tools
 """
 
-def ask_mode_agent(query: str, clipboard_text: str | None = None, progress_callback=None):
+def ask_mode_agent(query: str, clipboard_text: str | None = None, progress_callback=None, log_callback=None):
     """
-    ASK MODE AGENT - AI-Powered Tool Selection
+    ASK MODE AGENT - AI-Powered Tool Selection with LOCAL-FIRST Architecture
     
     Uses Delta (Ollama qwen2.5:3b) to intelligently decide which tool to use.
-    The AI understands the query and picks the best tool - no hardcoding!
+    NOW WITH: Local-First, Cloud-Fallback + Detailed Logging!
     
     Flow:
     1. User asks question
-    2. Delta AI analyzes query
-    3. Delta decides which tool to use
-    4. Tool executes and returns answer
-    5. Gemini only used as fallback or for final synthesis
+    2. Delta AI analyzes query → selects tool
+    3. Tool executes → returns raw data  
+    4. Brain humanizes output (Local-First, Gemini Fallback)
+    5. User gets friendly response + detailed logs
     
     Args:
         query: User's question
         clipboard_text: Optional clipboard context
-        progress_callback: Optional function to call with progress updates
+        progress_callback: Optional function(msg) for UI updates
+        log_callback: Optional function(event, data) for detailed logging
         
     Returns:
-        str: Answer to the query
+        str: Humanized, friendly answer
     """
     import time
     
@@ -40,8 +41,14 @@ def ask_mode_agent(query: str, clipboard_text: str | None = None, progress_callb
             progress_callback(msg)
         print(f"📊 {msg}")
     
+    def log_event(event_type, data):
+        """Helper to log events"""
+        if log_callback:
+            log_callback(event_type, data)
+    
     try:
         progress("🤖 AI analyzing query to select best tool...")
+        log_event("ROUTING_START", {"query": query})
         
         # STEP 1: Ask Delta (Ollama) which tool to use
         routing_decision = _ask_delta_for_routing(query, progress)
@@ -53,16 +60,62 @@ def ask_mode_agent(query: str, clipboard_text: str | None = None, progress_callb
         progress(f"🎯 Delta decided: {tool_name}")
         progress(f"💭 Reasoning: {reasoning}")
         
+        log_event("TOOL_SELECTED", {
+            "tool": tool_name,
+            "params": params,
+            "reasoning": reasoning
+        })
+        
         # STEP 2: Execute the tool Delta selected
-        result = _execute_selected_tool(
+        raw_result = _execute_selected_tool(
             tool_name=tool_name,
             params=params,
             original_query=query,
             clipboard_text=clipboard_text,
-            progress=progress
+            progress=progress,
+            log_callback=log_callback  # Pass logging function
         )
         
-        return result
+        log_event("TOOL_EXECUTED", {
+            "tool": tool_name,
+            "result_length": len(raw_result),
+            "result_preview": raw_result[:200]
+        })
+        
+        # STEP 3: SYNTHESIS PIPELINE - Humanize the output
+        # Skip humanization for tools that already return friendly text
+        skip_humanization = tool_name in ['general_chat', 'web_search']
+        
+        if skip_humanization:
+            log_event("HUMANIZATION_SKIPPED", {"reason": "Tool already friendly"})
+            return raw_result
+        
+        progress("✨ Making response friendly...")
+        log_event("HUMANIZATION_START", {"input_length": len(raw_result)})
+        
+        # Import DeltaBrain for humanization
+        from brain_client import DeltaBrain
+        brain = DeltaBrain()
+        
+        # Humanize with logging
+        def humanize_log(msg):
+            progress(msg)
+            log_event("HUMANIZATION_LOG", {"message": msg})
+        
+        # Humanize the raw tool output (LOCAL-FIRST!)
+        friendly_result = brain.humanize_tool_output(
+            query=query,
+            tool_output=raw_result,
+            tool_name=tool_name,
+            log_callback=humanize_log
+        )
+        
+        log_event("HUMANIZATION_COMPLETE", {
+            "output_length": len(friendly_result),
+            "model_used": "Delta-Local-or-Gemini-Fallback"
+        })
+        
+        return friendly_result
         
     except Exception as e:
         import traceback
@@ -83,60 +136,63 @@ def _ask_delta_for_routing(query: str, progress_callback):
     
     tools_guide = """Available Tools:
 
-1. get_weather
-   Use when: User asks about weather, temperature, should take umbrella, rain, forecast
-   Parameters: {"city": "city_name"}
-   Example: "Should I take umbrella?" → get_weather
+get_weather
+- Provides current weather conditions and forecast for a city
+- Parameters: {"city": "city_name"}
 
-2. get_stock_price
-   Use when: User asks about stock prices, crypto prices, market data
-   Parameters: {"ticker": "AAPL"}
-   Example: "What's Tesla stock?" → get_stock_price
+get_stock_price
+- Retrieves current stock or cryptocurrency prices
+- Parameters: {"ticker": "AAPL"}
 
-3. search_wikipedia
-   Use when: User asks "who is", "what is", "tell me about", biography, history
-   Parameters: {"query": "search_term"}
-   Example: "Who was Einstein?" → search_wikipedia
+search_wikipedia
+- Searches Wikipedia for general knowledge, biographies, history
+- Parameters: {"query": "search_term"}
 
-4. get_definition
-   Use when: User asks "define", "meaning of", "what does X mean"
-   Parameters: {"word": "word"}
-   Example: "Define serendipity" → get_definition
+get_definition
+- Looks up dictionary definition of a word
+- Parameters: {"word": "word"}
 
-5. is_website_down
-   Use when: User asks if website is down, working, online, offline
-   Parameters: {"url": "website.com"}
-   Example: "Is Google down?" → is_website_down
+is_website_down
+- Checks if a website is currently accessible
+- Parameters: {"url": "website.com"}
 
-6. search_reddit_opinions
-   Use when: User asks about Reddit opinions, reviews, "best X", recommendations
-   Parameters: {"topic": "query"}
-   Example: "Best laptops Reddit" → search_reddit_opinions
+search_reddit_opinions
+- Searches Reddit for community discussions and opinions
+- Parameters: {"topic": "query"}
 
-7. web_search
-   Use when: User asks about latest news, current events, recent information
-   Parameters: {"query": "search_query"}
-   Example: "Latest AI news" → web_search
+web_search
+- Searches the web for information, finds reports, compares products, gets latest news, research papers, technical documentation, benchmarks, specs, reviews, how-to guides, current events
+- Parameters: {"query": "search_query"}
 
-8. general_chat
-   Use when: General questions, conversations, anything else
-   Parameters: {"query": "user_query"}
-   Example: "Explain quantum physics" → general_chat
-"""
+general_chat
+- Direct AI conversation without external tools for explanations, discussions, creative writing, personal questions
+- Parameters: {"query": "user_query"}"""
 
-    delta_prompt = f"""You are a smart tool router. Analyze the user's query and pick the BEST tool.
+    delta_prompt = f"""You are an intelligent tool router. Analyze the user's query and select the BEST tool to answer it.
 
 {tools_guide}
 
 USER QUERY: "{query}"
 
-Think:
-- What is the user really asking?
-- Which tool is BEST for this?
-- What parameters does it need?
+THINK CAREFULLY:
+1. What information does the user need?
+2. Which tool can provide that information most directly?
+3. What parameters does that tool need?
 
-Respond with ONLY valid JSON (no markdown, no code blocks):
-{{"tool": "tool_name", "params": {{"key": "value"}}, "reasoning": "why this tool"}}"""
+If the user needs to:
+- Find/search/research/compare/get reports/latest info → Consider which tool searches that type of content
+- Get weather/forecast → Consider weather tool
+- Check stock/crypto prices → Consider stock tool
+- Learn about a person/place/thing → Consider which tools provide that knowledge
+- Get word meaning → Consider definition tool
+- Check website status → Consider website tool
+- See community opinions → Consider opinion tools
+- Have a conversation/explanation → Consider chat tool
+
+BE SMART. CHOOSE THE TOOL THAT BEST MATCHES WHAT THE USER ACTUALLY NEEDS.
+
+Respond with ONLY valid JSON (no markdown, no explanations, no code blocks):
+{{"tool": "tool_name", "params": {{"key": "value"}}, "reasoning": "brief explanation"}}"""
 
     try:
         progress_callback("🧠 Asking Delta AI for decision...")
@@ -185,7 +241,7 @@ Respond with ONLY valid JSON (no markdown, no code blocks):
 
 
 def _execute_selected_tool(tool_name: str, params: dict, original_query: str, 
-                           clipboard_text: str | None, progress):
+                           clipboard_text: str | None, progress, log_callback=None):
     """
     Execute the tool that Delta selected.
     """
@@ -228,6 +284,8 @@ def _execute_selected_tool(tool_name: str, params: dict, original_query: str,
         
         elif tool_name == 'web_search':
             from src.rag.web_search import WebSearchRAG
+            from brain_client import DeltaBrain
+            
             search_query = params.get('query', original_query)
             progress(f"🔍 Searching web...")
             
@@ -237,24 +295,42 @@ def _execute_selected_tool(tool_name: str, params: dict, original_query: str,
             if results['sources_count'] > 0:
                 progress(f"✅ Found {results['sources_count']} sources | 🤖 Generating answer...")
                 
-                from src.brain.tools_gemini import general_chat
-                web_prompt = f"""Using these web search results, answer the question:
-
-QUESTION: {original_query}
-
-WEB RESULTS:
-{results['context'][:3000]}
-
-Provide a clear, accurate answer based on the web results above."""
+                # USE DELTA BRAIN with Local-First, Cloud-Fallback!
+                brain = DeltaBrain()
                 
-                return general_chat(web_prompt)
+                def synthesis_log(msg):
+                    progress(msg)
+                    if log_callback:
+                        log_callback("SYNTHESIS_LOG", {"message": msg})
+                
+                answer, model_used = brain.synthesize_web_results(
+                    query=original_query,
+                    search_results=results,
+                    log_callback=synthesis_log
+                )
+                
+                if log_callback:
+                    log_callback("SYNTHESIS_COMPLETE", {
+                        "model_used": model_used,
+                        "answer_length": len(answer)
+                    })
+                
+                return answer
             else:
                 progress("⚠️  No web results, using AI knowledge...")
-                from src.brain.tools_gemini import general_chat
-                return general_chat(original_query)
+                # Fallback to general chat if no search results
+                from brain_client import DeltaBrain
+                brain = DeltaBrain()
+                response, model_used = brain.safe_ask(
+                    original_query,
+                    mode="balanced",
+                    log_callback=lambda msg: progress(msg) if progress else None
+                )
+                return response
         
         else:  # general_chat (default fallback)
-            from src.brain.tools_gemini import general_chat
+            from brain_client import DeltaBrain
+            brain = DeltaBrain()
             
             # Use clipboard context if available
             if clipboard_text and len(clipboard_text.strip()) >= 5:
@@ -265,10 +341,29 @@ CLIPBOARD CONTEXT:
 {clipboard_text[:4000]}
 
 Answer the question based on the clipboard context above. Be clear and concise."""
-                return general_chat(enhanced_query)
+                
+                response, model_used = brain.safe_ask(
+                    enhanced_query,
+                    mode="balanced",
+                    log_callback=lambda msg: progress(msg) if progress else None
+                )
+                
+                if log_callback:
+                    log_callback("CHAT_COMPLETE", {"model_used": model_used})
+                
+                return response
             else:
                 progress("🤖 Generating answer...")
-                return general_chat(original_query)
+                response, model_used = brain.safe_ask(
+                    original_query,
+                    mode="balanced",
+                    log_callback=lambda msg: progress(msg) if progress else None
+                )
+                
+                if log_callback:
+                    log_callback("CHAT_COMPLETE", {"model_used": model_used})
+                
+                return response
     
     except Exception as e:
         import traceback

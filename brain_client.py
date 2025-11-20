@@ -18,6 +18,20 @@ sys.path.insert(0, str(project_root))
 
 from src.tools.web_tools import RobustSearch, WikiTool, WebReader
 from src.brain.skills import Skills
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+import time
+
+@dataclass
+class BrainResponse:
+    """Structured response from Brain API."""
+    raw_response: str
+    suggested_action: Optional[str] = None
+    action_type: Optional[str] = None
+    confidence: Optional[float] = None
+    reasoning: Optional[str] = None
+    response_time_ms: float = 0.0
+    model_used: str = "unknown"
 
 class DeltaBrain:
     """Client for Delta HPC Brain system
@@ -46,6 +60,17 @@ class DeltaBrain:
             "balanced": "qwen2.5:7b",
             "smart": "qwen2.5:14b"
         }
+        
+        # Action types the Brain can suggest
+        self.ACTIONS = {
+            'open_url': 'Open URL in browser',
+            'search_file': 'Search for file in project',
+            'fix_error': 'Suggest code fix',
+            'explain_code': 'Explain code snippet',
+            'add_to_clipboard': 'Add text to clipboard',
+            'show_notification': 'Show notification',
+            'do_nothing': 'No action needed'
+        }
     
     def execute_command(self, command: str) -> str:
         """Execute command using autonomous agent with Gemini AI
@@ -65,53 +90,100 @@ class DeltaBrain:
             import traceback
             return f"❌ Agent error: {str(e)}\n{traceback.format_exc()[:200]}"
     
-    def ask(self, prompt, mode="balanced", max_tokens=None):
-        """Send question to Brain
+    def safe_ask(self, prompt, mode="balanced", max_tokens=None, log_callback=None):
+        """LOCAL-FIRST, CLOUD-FALLBACK: Try Delta Brain, fallback to Gemini
+        
+        This is the CORE method that implements intelligent fallback strategy.
         
         Args:
             prompt: Your question or request
             mode: "fast", "balanced", or "smart"
-            max_tokens: Optional max tokens for response (None = unlimited)
+            max_tokens: Optional max tokens for response
+            log_callback: Optional function(msg) to log decisions
             
         Returns:
-            AI response as string
+            tuple: (response_text, model_used)
+                model_used: "Delta-3B", "Delta-7B", "Delta-14B", or "Gemini"
         """
-        # Auto-detect if response should be concise
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+        
+        # Auto-detect concise requests
         prompt_lower = prompt.lower()
         instruction_keywords = ['concise', 'brief', 'short', 'quick', 'summary', 'tldr']
         is_concise_request = any(keyword in prompt_lower for keyword in instruction_keywords)
         
-        # Set max_tokens based on instruction detection if not explicitly provided
         if max_tokens is None and is_concise_request:
-            max_tokens = 256  # Limit to ~256 tokens for concise responses
+            max_tokens = 256
+        
+        # Smart timeout based on model size
+        timeouts = {"fast": 15, "balanced": 30, "smart": 60}
+        timeout = timeouts.get(mode, 30)
         
         port = self.ports[mode]
         model = self.models[mode]
+        model_name = f"Delta-{model.split(':')[1].upper()}"  # "Delta-3B", "Delta-7B", "Delta-14B"
         url = f"http://{self.host}:{port}/api/generate"
         
+        # STEP 1: Try LOCAL Delta Brain first
         try:
+            log(f"🧠 Trying {model_name} (Local, Private, Free)...")
+            
             payload = {
                 "model": model,
                 "prompt": prompt,
                 "stream": False
             }
             
-            # Add max_tokens if specified
             if max_tokens:
                 payload["options"] = {"num_predict": max_tokens}
             
-            response = requests.post(url, json=payload, timeout=90)
-            return response.json()["response"]
+            response = requests.post(url, json=payload, timeout=timeout)
+            
+            if response.status_code == 200:
+                answer = response.json().get("response", "")
+                log(f"✅ {model_name} responded successfully")
+                return (answer, model_name)
+            else:
+                log(f"⚠️  {model_name} returned status {response.status_code}")
+                raise Exception(f"HTTP {response.status_code}")
+                
         except requests.exceptions.Timeout:
-            return f"Timeout Error: Brain took longer than 90 seconds to respond.\nTry using 'fast' mode or check if Brain is overloaded."
+            log(f"⏱️  {model_name} timed out after {timeout}s")
         except requests.exceptions.ConnectionError:
-            return f"Connection Error: Cannot connect to Brain on port {port}.\nMake sure SSH tunnel is active with: ./scripts/connect_brain_key.sh"
-        except requests.exceptions.RequestException as e:
-            return f"Connection Error: {str(e)}\nMake sure SSH tunnel is active!"
-        except KeyError:
-            return f"Error: Invalid response from Brain. The model may not be loaded."
+            log(f"📡 {model_name} not reachable (tunnel down?)")
         except Exception as e:
-            return f"Error: {str(e)}"
+            log(f"⚠️  {model_name} error: {str(e)[:50]}")
+        
+        # STEP 2: FALLBACK to Gemini (Cloud)
+        try:
+            log("☁️  Falling back to Gemini (Cloud)...")
+            from src.brain.tools_gemini import generate_with_fallback
+            
+            gemini_response = generate_with_fallback(prompt)
+            # Extract text from response object
+            response_text = gemini_response.text if hasattr(gemini_response, 'text') else str(gemini_response)
+            log("✅ Gemini responded successfully")
+            return (response_text, "Gemini-Cloud")
+            
+        except Exception as e:
+            log(f"❌ Gemini also failed: {str(e)[:50]}")
+            return (f"Error: Both Delta and Gemini failed. Please try again.\n{str(e)[:100]}", "Error")
+    
+    def ask(self, prompt, mode="balanced", max_tokens=None):
+        """Legacy method - now uses safe_ask internally
+        
+        Args:
+            prompt: Your question or request
+            mode: "fast", "balanced", or "smart"
+            max_tokens: Optional max tokens for response
+            
+        Returns:
+            AI response as string
+        """
+        response, model_used = self.safe_ask(prompt, mode, max_tokens)
+        return response
     
     def ask_with_context(self, question, context_chunks, mode="balanced", max_tokens=None):
         """Ask a question with retrieved context chunks (RAG pattern)
@@ -143,12 +215,13 @@ Answer the question using the context provided above. If the context doesn't con
         # Use regular ask() method with the enhanced prompt
         return self.ask(enhanced_prompt, mode=mode, max_tokens=max_tokens)
     
-    def analyze_error(self, error_msg, code=""):
-        """Analyze code error and provide solution
+    def analyze_error(self, error_msg, code="", log_callback=None):
+        """Analyze code error and provide solution (with fallback)
         
         Args:
             error_msg: Error message or exception
             code: Code snippet that caused the error (optional)
+            log_callback: Optional logging function
             
         Returns:
             Analysis with cause, fix, and corrected code
@@ -162,14 +235,16 @@ Provide:
 1. What caused it
 2. How to fix it
 3. Fixed code"""
-        return self.ask(prompt, mode="balanced")
+        response, model_used = self.safe_ask(prompt, mode="balanced", log_callback=log_callback)
+        return response
     
-    def explain_code(self, code, mode="balanced"):
-        """Explain what code does
+    def explain_code(self, code, mode="balanced", log_callback=None):
+        """Explain what code does (with fallback)
         
         Args:
             code: Code snippet to explain
             mode: Model to use
+            log_callback: Optional logging function
             
         Returns:
             Explanation of the code
@@ -179,10 +254,11 @@ Provide:
 {code}
 
 Provide a clear, concise explanation."""
-        return self.ask(prompt, mode=mode)
+        response, model_used = self.safe_ask(prompt, mode=mode, log_callback=log_callback)
+        return response
     
-    def optimize_code(self, code, mode="smart"):
-        """Optimize code for better performance
+    def optimize_code(self, code, mode="smart", log_callback=None):
+        """Optimize code for better performance (with fallback)
         
         Args:
             code: Code to optimize
@@ -199,14 +275,16 @@ Provide:
 1. Performance issues identified
 2. Optimized version
 3. Explanation of improvements"""
-        return self.ask(prompt, mode=mode)
+        response, model_used = self.safe_ask(prompt, mode=mode, log_callback=log_callback)
+        return response
     
-    def review_code(self, code, mode="balanced"):
-        """Review code for bugs and best practices
+    def review_code(self, code, mode="balanced", log_callback=None):
+        """Review code for bugs and best practices (with fallback)
         
         Args:
             code: Code to review
             mode: Model to use
+            log_callback: Optional logging function
             
         Returns:
             Code review with suggestions
@@ -219,6 +297,8 @@ Provide:
 1. Issues found
 2. Suggestions for improvement
 3. Fixed version if needed"""
+        response, model_used = self.safe_ask(prompt, mode=mode, log_callback=log_callback)
+        return response
         return self.ask(prompt, mode=mode)
     
     def check_connection(self):
@@ -425,6 +505,138 @@ Classification:"""
         else:
             return "OLLAMA_ONLY"
     
+    def humanize_response(self, text: str, log_callback=None) -> tuple:
+        """
+        THE STYLE ENGINE: Transform any raw text into friendly, conversational response
+        
+        This is a universal humanizer that works on ANY raw data:
+        - Tool outputs: "Temp: 5C" → "It's 5°C, so grab a coat!"
+        - Search results: "GDP: $21T" → "The GDP is $21 trillion, quite impressive!"
+        - Definitions: "noun: happiness" → "It means happiness - that warm fuzzy feeling!"
+        
+        Args:
+            text: Raw text to humanize
+            log_callback: Optional function to log decisions
+            
+        Returns:
+            tuple: (humanized_text, model_used)
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+        
+        # Skip if already friendly
+        if text and (text.startswith('🤖') or text.startswith('✅') or 
+                     'friendly' in text.lower()[:100] or len(text) > 1500):
+            log("ℹ️  Text already conversational, skipping humanization")
+            return (text, "Skipped")
+        
+        # Smart model selection based on length (3-tier routing!)
+        if len(text) < 300:
+            mode = "fast"  # 3B for short text
+            log("📊 Short text (<300 chars) → Using Fast model (3B)")
+        elif len(text) < 1000:
+            mode = "balanced"  # 7B for medium text
+            log("📊 Medium text (300-1000 chars) → Using Balanced model (7B)")
+        else:
+            mode = "smart"  # 14B for long/complex text
+            log("📊 Long text (>1000 chars) → Using Smart model (14B)")
+        
+        from datetime import datetime
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
+        # Universal friendly prompt (NO HARDCODING!)
+        prompt = f"""You are a friendly, helpful AI assistant. Transform the raw data below into a warm, conversational response.
+
+CURRENT DATE: {current_date}
+
+RAW DATA:
+{text[:2000]}
+
+INSTRUCTIONS:
+- Be friendly, warm, and conversational (like talking to a friend)
+- Interpret the data naturally - don't just repeat it robotically
+- If it's advice-worthy (weather, health, decisions), give helpful recommendations
+- If it's factual (definitions, prices, data), explain it naturally
+- Keep it concise but complete (50-200 words)
+- Use a natural, human tone - NO robotic data dumps!
+- Answer in ENGLISH ONLY
+
+YOUR FRIENDLY RESPONSE:"""
+        
+        try:
+            response, model_used = self.safe_ask(prompt, mode=mode, log_callback=log)
+            log(f"✅ Humanized with {model_used}")
+            return (response.strip(), model_used)
+        except Exception as e:
+            log(f"⚠️  Humanization failed: {e}")
+            return (text, "Error-Original")
+    
+    def humanize_tool_output(self, query: str, tool_output: str, tool_name: str | None = None, log_callback=None) -> str:
+        """
+        Humanize raw tool output into friendly, conversational response
+        
+        This is the SYNTHESIS PIPELINE that transforms robotic data into natural language.
+        NOW USES humanize_response() for intelligent model selection and fallback.
+        
+        Args:
+            query: Original user query
+            tool_output: Raw output from tool (e.g. "Temp: 5C" or "AAPL: $150.23")
+            tool_name: Optional name of the tool that generated output
+            log_callback: Optional logging function
+            
+        Returns:
+            Friendly, conversational answer
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+        
+        # Skip humanization if output is already conversational
+        if tool_output and (tool_output.startswith('🤖') or tool_output.startswith('✅') or 
+                            'friendly' in tool_output.lower()[:100] or len(tool_output) > 500):
+            log("ℹ️  Tool output already friendly")
+            return tool_output
+        
+        log(f"🎨 Humanizing tool output for query: '{query[:50]}...'")
+        
+        from datetime import datetime
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
+        # Context-aware prompt that references the user's question
+        context_prompt = f"""You are a friendly and helpful AI assistant. Answer the user's question using the raw data below.
+
+CURRENT DATE: {current_date}
+
+USER QUESTION: {query}
+
+RAW DATA:
+{tool_output[:2000]}
+
+INSTRUCTIONS:
+- Answer the user's question directly and naturally
+- Interpret the data - don't just repeat it
+- If the user asks "should I...", give friendly advice based on the data
+- Be conversational and warm, like talking to a friend
+- Keep it focused and concise (50-200 words)
+- Answer in ENGLISH ONLY
+
+YOUR FRIENDLY ANSWER:"""
+        
+        try:
+            # Use safe_ask for automatic fallback
+            response, model_used = self.safe_ask(
+                context_prompt, 
+                mode="fast",  # Use fast for humanization
+                max_tokens=300,
+                log_callback=log
+            )
+            log(f"✅ Humanized with {model_used}")
+            return response.strip()
+        except Exception as e:
+            log(f"⚠️  Humanization failed: {e}")
+            return tool_output
+    
     def split_multi_query(self, query: str) -> list:
         """
         Split multi-query into separate sub-questions using Ollama 3B
@@ -460,67 +672,138 @@ Individual questions:"""
     
     def estimate_complexity(self, query: str) -> str:
         """
-        Estimate query complexity using Ollama 3B
+        Intelligently estimate query complexity based on content and intent
         
         Args:
             query: User query
             
         Returns:
-            "SIMPLE" or "COMPLEX"
+            "SIMPLE", "MEDIUM", or "COMPLEX"
         """
-        prompt = f"""Is this query SIMPLE (basic fact, definition) or COMPLEX (requires reasoning, analysis)?
-Reply with ONLY one word: SIMPLE or COMPLEX
-
-Query: {query}
-
-Classification:"""
+        # RULE-BASED CLASSIFICATION (Fast, No AI needed!)
+        query_lower = query.lower()
+        word_count = len(query.split())
         
-        response = self.ask(prompt, mode="fast", max_tokens=5)
+        # SIMPLE indicators (3B model) - Short, basic facts
+        # These OVERRIDE technical terms!
+        simple_patterns = [
+            'what is', 'who is', 'define', 'meaning of',
+            'capital of', 'weather in', 'time in',
+            'how to spell', 'translate'
+        ]
         
-        return "COMPLEX" if "COMPLEX" in response.upper() else "SIMPLE"
+        # Check for SIMPLE patterns FIRST (highest priority for basic questions)
+        if any(pattern in query_lower for pattern in simple_patterns):
+            if word_count <= 8:  # Short, simple query
+                return "SIMPLE"
+        
+        # COMPLEX indicators (14B model) - Deep analysis, comparisons
+        complex_patterns = [
+            'compare', 'vs', 'versus', 'difference between',
+            'analyze', 'evaluate', 'critique',
+            'why does', 'explain why', 'how does',
+            'pros and cons', 'advantages and disadvantages',
+            'technical report', 'research', 'detailed',
+            'in-depth', 'comprehensive'
+        ]
+        
+        # Check for COMPLEX patterns
+        if any(pattern in query_lower for pattern in complex_patterns):
+            return "COMPLEX"
+        
+        # Check for technical/domain-specific terms (COMPLEX)
+        # BUT only if not a simple "what is" question
+        technical_indicators = [
+            'fips', 'algorithm', 'protocol', 'standard',
+            'architecture', 'implementation', 'benchmark',
+            'cryptography', 'encryption'
+        ]
+        if any(term in query_lower for term in technical_indicators):
+            return "COMPLEX"
+        
+        # MEDIUM indicators (7B model) - Multi-part, recipes, recent events
+        medium_patterns = [
+            'how can i', 'how do i', 'how to',
+            'recipe', 'cook', 'make',
+            'latest', 'recent', 'new', 'update',
+            'features of', 'what are', 'list',
+            'who won', 'who win', 'election', 'news'
+        ]
+        
+        # Check for MEDIUM patterns
+        if any(pattern in query_lower for pattern in medium_patterns):
+            return "MEDIUM"
+        
+        # Fallback based on length
+        if word_count >= 10:
+            return "MEDIUM"  # Longer queries likely need more reasoning
+        
+        # Final fallback: SIMPLE for very short queries
+        return "SIMPLE"
     
-    def synthesize_web_results(self, query: str, search_results: dict) -> str:
+    def synthesize_web_results(self, query: str, search_results: dict, log_callback=None) -> tuple:
         """
         Synthesize answer from web search results using appropriate Ollama model
+        NOW WITH LOCAL-FIRST, CLOUD-FALLBACK architecture!
         
         Args:
             query: Original user query
             search_results: Dict from WebSearchRAG.search() containing 'results' and 'context'
+            log_callback: Optional logging function
             
         Returns:
-            Synthesized answer with sources
+            tuple: (synthesized_answer_with_sources, model_used)
         """
-        source_count = search_results.get('sources_count', 0)
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
         
-        # Choose model based on number of sources
-        # 1-2 sources: Use 7B (balanced)
-        # 3+ sources: Use 14B (smart) for complex synthesis
-        mode = "balanced" if source_count <= 2 else "smart"
+        # STEP 1: Intelligent model selection (NO HARDCODING!)
+        log("🤔 Analyzing query complexity...")
+        complexity = self.estimate_complexity(query)
+        log(f"📊 Complexity: {complexity}")
         
-        # Build synthesis prompt
+        # Smart 3-tier model selection
+        if complexity == "SIMPLE":
+            mode = "fast"  # 3B for simple facts
+            log("⚡ Simple query → Using Fast model (3B)")
+        elif complexity == "MEDIUM":
+            mode = "balanced"  # 7B for moderate complexity
+            log("📚 Medium query → Using Balanced model (7B)")
+        else:  # COMPLEX
+            mode = "smart"  # 14B for deep analysis
+            log("🧠 Complex query → Using Smart model (14B)")
+        
+        # Get context text for prompt
+        context_text = search_results.get('context', '')
+        
+        # Build universal friendly synthesis prompt (NO HARDCODING!)
         from datetime import datetime
         current_date = datetime.now().strftime("%B %d, %Y")
         
-        prompt = f"""Answer the user's question using ONLY the web search results below.
+        prompt = f"""You are a friendly and helpful AI assistant. Answer the user's question naturally using the data below.
 
 CURRENT DATE: {current_date}
 
 USER QUESTION: {query}
 
-WEB SEARCH RESULTS ({source_count} sources):
-{search_results.get('context', '')}
+DATA FROM WEB SOURCES:
+{context_text[:8000]}
 
 INSTRUCTIONS:
-- Answer the question directly and completely
-- Use information from the web search results above
+- Be warm, friendly, and conversational
+- Interpret the data - don't just list facts robotically
+- If the user asks for advice or "should I...", give helpful recommendations
+- Answer completely and clearly in natural language
 - Cite key facts when relevant
-- Keep your answer clear and concise (200-400 words)
-- If the results don't fully answer the question, say so
+- Keep your answer focused (200-400 words)
+- If data is insufficient, say so honestly and provide what you know
 - Answer in ENGLISH ONLY
 
-ANSWER:"""
+YOUR FRIENDLY ANSWER:"""
         
-        answer = self.ask(prompt, mode=mode, max_tokens=600)
+        # Use safe_ask for automatic fallback!
+        answer, model_used = self.safe_ask(prompt, mode=mode, max_tokens=600, log_callback=log)
         
         # Append source list
         sources_text = "\n\n📚 Sources:\n"
@@ -528,9 +811,123 @@ ANSWER:"""
             title = result.title[:80] + "..." if len(result.title) > 80 else result.title
             sources_text += f"[{i}] {title} - {result.source}\n"
         
-        return answer + sources_text
+        return (answer + sources_text, model_used)
 
+    def analyze_context(self, context, mode: str = 'balanced') -> BrainResponse:
+        """
+        Analyze a context package and suggest actions.
+        
+        Args:
+            context: ContextPackage from trigger system
+            mode: 'fast', 'balanced', or 'smart'
+            
+        Returns:
+            BrainResponse with suggested action
+        """
+        start_time = time.time()
+        
+        # Build the prompt
+        prompt = self._build_context_prompt(context)
+        
+        try:
+            # Use safe_ask to get response
+            response_text, model_used = self.safe_ask(prompt, mode=mode)
+            
+            # Parse response into structured format
+            brain_response = self._parse_context_response(
+                response_text=response_text,
+                model=model_used,
+                start_time=start_time
+            )
+            
+            return brain_response
+            
+        except Exception as e:
+            return BrainResponse(
+                raw_response=f"Error: {str(e)}",
+                action_type='do_nothing',
+                confidence=0.0,
+                response_time_ms=(time.time() - start_time) * 1000,
+                model_used="error"
+            )
 
+    def _build_context_prompt(self, context) -> str:
+        """Build a prompt from context package."""
+        content_type = context.clipboard_metadata.get('type', 'unknown')
+        content = context.clipboard_content
+        
+        # System prompt - defines the agent's role
+        system_prompt = """You are a proactive AI assistant that helps developers by analyzing their clipboard and screen context.
+
+When you see clipboard content, analyze it and suggest helpful actions.
+
+Available actions:
+- open_url: If clipboard contains a URL
+- search_file: If clipboard contains a filename or path
+- fix_error: If clipboard contains an error message
+- explain_code: If clipboard contains code
+- add_to_clipboard: If you want to suggest text to copy
+- show_notification: If you want to show a helpful tip
+- do_nothing: If no action is needed
+
+Respond in JSON format:
+{
+  "action_type": "action_name",
+  "suggested_action": "specific action to take",
+  "confidence": 0.0-1.0,
+  "reasoning": "why you suggest this"
+}"""
+
+        # User prompt - the actual context
+        user_prompt = f"""Clipboard Content Type: {content_type}
+Clipboard Text:
+{content}
+
+Has Screenshot: {bool(context.screenshot_base64)}
+
+What action should I take to help the user?"""
+
+        return f"{system_prompt}\n\n{user_prompt}"
+
+    def _parse_context_response(self, response_text: str, model: str, start_time: float) -> BrainResponse:
+        """Parse Brain response into structured format."""
+        response_time_ms = (time.time() - start_time) * 1000
+        
+        try:
+            # Look for JSON in the response
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+            
+            if json_start >= 0 and json_end > json_start:
+                json_str = response_text[json_start:json_end]
+                data = json.loads(json_str)
+                
+                return BrainResponse(
+                    raw_response=response_text,
+                    suggested_action=data.get('suggested_action'),
+                    action_type=data.get('action_type'),
+                    confidence=data.get('confidence', 0.5),
+                    reasoning=data.get('reasoning'),
+                    response_time_ms=response_time_ms,
+                    model_used=model
+                )
+            else:
+                return BrainResponse(
+                    raw_response=response_text,
+                    action_type='do_nothing',
+                    confidence=0.3,
+                    response_time_ms=response_time_ms,
+                    model_used=model
+                )
+                
+        except json.JSONDecodeError:
+            return BrainResponse(
+                raw_response=response_text,
+                action_type='do_nothing',
+                confidence=0.3,
+                response_time_ms=response_time_ms,
+                model_used=model
+            )
 if __name__ == "__main__":
     print("🧠 Delta Brain Client")
     print("=" * 50)

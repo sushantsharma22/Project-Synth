@@ -3,6 +3,8 @@
 Uses PyObjC to create a dropdown with text field embedded directly
 """
 
+
+
 import warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', message='PyObjCPointer created')
@@ -12,10 +14,13 @@ from pathlib import Path
 import subprocess
 import threading
 import time
+import atexit
+import os
+import signal
 from AppKit import (NSApplication, NSStatusBar, NSMenu, NSMenuItem,
                     NSTextField, NSButton, NSView, NSColor, NSFont,
                     NSNotificationCenter, NSUserNotification, NSUserNotificationCenter,
-                    NSTextView, NSScrollView, NSPasteboard, NSApp)
+                    NSTextView, NSScrollView, NSPasteboard, NSApp, NSBox)
 from Foundation import NSObject, NSMakeRect, NSMakeSize
 import objc
 from typing import Any, cast
@@ -53,6 +58,257 @@ from src.rag.local_rag import SynthRAG
 from src.ui.chat_manager import ChatManager
 
 
+# ============================================================================
+# SSH TUNNEL MANAGEMENT FOR DELTA BRAIN CONNECTION
+# ============================================================================
+
+# Global variable to store SSH tunnel process
+ssh_tunnel_process = None
+ssh_connection_id = None  # Store SSH username@host for cleanup
+
+def start_ssh_tunnel():
+    """
+    Start SSH tunnel to Delta Brain in background using credentials from .env
+    
+    Creates tunnels for all three models:
+    - Port 11434: Fast Model (3B)
+    - Port 11435: Balanced Model (7B)
+    - Port 11436: Smart Model (14B)
+    
+    Security:
+    - Uses credentials from .env file (no hardcoding)
+    - Uses sshpass for non-interactive authentication
+    - Creates ControlMaster for clean remote cleanup
+    """
+    global ssh_tunnel_process, ssh_connection_id
+    
+    # Load credentials from .env
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    ssh_id = os.getenv('SSH_ID')
+    ssh_passwd = os.getenv('SSH_PASSWD')
+    
+    if not ssh_id or not ssh_passwd:
+        print("❌ SSH credentials not found in .env file")
+        print("   Required: SSH_ID and SSH_PASSWD")
+        print("   App will continue with Gemini fallback only")
+        return
+    
+    ssh_connection_id = ssh_id  # Store for cleanup
+    
+    print("\n" + "="*60)
+    print("🔌 STARTING DELTA BRAIN SSH TUNNEL")
+    print("="*60)
+    print(f"   Using credentials from .env: {ssh_id.split('@')[0]}@***")
+    
+    # Check if tunnel already exists
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"ssh.*11434.*{ssh_id.split('@')[1]}"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print("⚠️  SSH tunnel already running (PID: {})".format(result.stdout.strip()))
+            print("   Skipping tunnel creation...")
+            return
+    except Exception:
+        pass
+    
+    # Check if sshpass is installed
+    try:
+        subprocess.run(["which", "sshpass"], capture_output=True, check=True)
+    except subprocess.CalledProcessError:
+        print("❌ sshpass not installed - required for automated SSH")
+        print("   Install: brew install sshpass")
+        print("   App will continue with Gemini fallback only")
+        return
+    
+    # SSH command with sshpass for non-interactive authentication
+    # Using ControlMaster for clean remote cleanup
+    ssh_command = [
+        "sshpass", "-p", ssh_passwd,
+        "ssh",
+        "-N",  # No remote command
+        "-o", "StrictHostKeyChecking=no",  # Auto-accept host key
+        "-o", "ServerAliveInterval=30",     # Keep connection alive
+        "-o", "ServerAliveCountMax=3",      # Retry 3 times
+        "-o", "ControlMaster=auto",         # Enable control socket
+        "-o", f"ControlPath=~/.ssh/synth-tunnel-{os.getpid()}",  # Unique socket per app instance
+        "-L", "11434:localhost:11434",     # Fast model (3B)
+        "-L", "11435:localhost:11435",     # Balanced model (7B)
+        "-L", "11436:localhost:11436",     # Smart model (14B)
+        ssh_id
+    ]
+    
+    try:
+        print("📡 Launching SSH tunnel with sshpass...")
+        print(f"   Target: {ssh_id}")
+        
+        # Start SSH process in background
+        ssh_tunnel_process = subprocess.Popen(
+            ssh_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid  # Create new process group for clean shutdown
+        )
+        
+        print(f"✅ SSH tunnel started (PID: {ssh_tunnel_process.pid})")
+        print("   Waiting 3 seconds for connection to establish...")
+        
+        # Wait for connection to establish
+        time.sleep(3)
+        
+        # Verify tunnel is working by checking ports
+        ports_ok = True
+        for port in [11434, 11435, 11436]:
+            try:
+                result = subprocess.run(
+                    ["nc", "-z", "localhost", str(port)],
+                    capture_output=True,
+                    timeout=1
+                )
+                if result.returncode == 0:
+                    print(f"   ✅ Port {port} - Connected")
+                else:
+                    print(f"   ⚠️  Port {port} - Not responding")
+                    ports_ok = False
+            except Exception as e:
+                print(f"   ⚠️  Port {port} - Check failed: {e}")
+                ports_ok = False
+        
+        if ports_ok:
+            print("\n✅ DELTA BRAIN TUNNEL ESTABLISHED")
+            print("   Fast (3B):     localhost:11434")
+            print("   Balanced (7B): localhost:11435")
+            print("   Smart (14B):   localhost:11436")
+        else:
+            print("\n⚠️  Some ports not responding - tunnel may still be connecting")
+            print("   Brain will fall back to Gemini if Delta is unavailable")
+        
+        print("="*60 + "\n")
+        
+    except Exception as e:
+        print(f"❌ Failed to start SSH tunnel: {e}")
+        print("   App will continue with Gemini fallback only")
+        ssh_tunnel_process = None
+
+
+def cleanup_tunnel():
+    """
+    Clean up SSH tunnel on app exit - BOTH on Mac AND Delta
+    
+    This ensures:
+    1. Local SSH process is killed (Mac side) - INCLUDING sshpass parent
+    2. Remote control socket is cleaned up (Delta side)
+    3. No orphaned processes remain on either system
+    """
+    global ssh_tunnel_process, ssh_connection_id
+    
+    if ssh_tunnel_process is None:
+        return
+    
+    print("\n" + "="*60)
+    print("🔌 CLEANING UP DELTA BRAIN SSH TUNNEL")
+    print("="*60)
+    
+    # STEP 1: Kill ALL SSH tunnels to Delta (in case sshpass creates orphans)
+    try:
+        print("📡 Killing all SSH tunnels to Delta (including orphaned processes)...")
+        # Use pkill to ensure we get ALL related processes
+        subprocess.run(
+            ["pkill", "-f", "ssh.*11434.*delta.cs.uwindsor.ca"],
+            capture_output=True,
+            timeout=5
+        )
+        print("✅ All SSH tunnel processes killed")
+    except subprocess.TimeoutExpired:
+        print("⚠️  Process cleanup timed out")
+    except Exception as e:
+        print(f"⚠️  pkill error: {e}")
+    
+    # STEP 2: Clean up remote control socket (Delta side)
+    if ssh_connection_id:
+        try:
+            print("📡 Cleaning up remote control socket on Delta...")
+            control_path = f"~/.ssh/synth-tunnel-{ssh_tunnel_process.pid}"
+            
+            # Send exit command through control socket to cleanly close remote end
+            subprocess.run(
+                ["ssh", "-O", "exit", "-o", f"ControlPath={control_path}", ssh_connection_id],
+                capture_output=True,
+                timeout=5
+            )
+            print("✅ Remote control socket cleaned up")
+        except subprocess.TimeoutExpired:
+            print("⚠️  Remote cleanup timed out (socket may already be closed)")
+        except Exception as e:
+            print(f"⚠️  Remote cleanup error: {e}")
+    
+    # STEP 3: Kill local SSH process group (backup cleanup)
+    try:
+        # Get process group ID
+        pgid = os.getpgid(ssh_tunnel_process.pid)
+        
+        print(f"📡 Terminating process group (PID: {ssh_tunnel_process.pid}, PGID: {pgid})")
+        
+        # Kill entire process group (handles child processes too)
+        os.killpg(pgid, signal.SIGTERM)
+        
+        # Wait for process to terminate (with timeout)
+        try:
+            ssh_tunnel_process.wait(timeout=3)
+            print("✅ Process group terminated cleanly")
+        except subprocess.TimeoutExpired:
+            # Force kill if graceful termination fails
+            print("⚠️  Graceful termination timed out, forcing...")
+            os.killpg(pgid, signal.SIGKILL)
+            ssh_tunnel_process.wait()
+            print("✅ Process group force-killed")
+        
+    except ProcessLookupError:
+        print("⚠️  Process group already terminated")
+    except Exception as e:
+        print(f"⚠️  Process group cleanup error: {e}")
+    
+    # STEP 4: Final verification - ensure no processes remain
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "ssh.*11434.*delta.cs.uwindsor.ca"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            remaining_pids = result.stdout.strip().split('\n')
+            print(f"⚠️  Found {len(remaining_pids)} remaining processes, force-killing...")
+            for pid in remaining_pids:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                    print(f"   ✅ Killed PID {pid}")
+                except Exception:
+                    pass
+        else:
+            print("✅ No remaining SSH processes found")
+    except Exception as e:
+        print(f"⚠️  Final verification error: {e}")
+    
+    # STEP 5: Clean up local control socket file
+    try:
+        control_path = os.path.expanduser(f"~/.ssh/synth-tunnel-{ssh_tunnel_process.pid}")
+        if os.path.exists(control_path):
+            os.remove(control_path)
+            print("✅ Local control socket file removed")
+    except Exception as e:
+        print(f"⚠️  Could not remove control socket: {e}")
+    
+    print("✅ TUNNEL CLEANUP COMPLETE (Mac + Delta)")
+    print("="*60 + "\n")
+    
+    ssh_tunnel_process = None
+    ssh_connection_id = None
+
+
 class CopyableTextView(NSTextView):
     """Custom NSTextView that properly handles copy/paste in menu bars"""
     
@@ -66,26 +322,27 @@ class CopyableTextView(NSTextView):
         return result
     
     def performKeyEquivalent_(self, event):
-        """Handle keyboard shortcuts like Cmd+C, Cmd+V, Cmd+A"""
-        # Get the modifier flags and key
-        modifierFlags = event.modifierFlags()
-        characters = event.charactersIgnoringModifiers()
-        
-        # Check for Command key
-        if modifierFlags & (1 << 20):  # NSCommandKeyMask
-            if characters == 'c':
-                self.copy_(None)
-                return True
-            elif characters == 'v':
-                self.paste_(None)
-                return True
-            elif characters == 'x':
-                self.cut_(None)
-                return True
-            elif characters == 'a':
-                self.selectAll_(None)
-                return True
-        
+        """Handle keyboard shortcuts for copy/paste/cut/select all"""
+        try:
+            modifierFlags = event.modifierFlags()
+            characters = event.charactersIgnoringModifiers()
+            # Command key mask (1 << 20)
+            if modifierFlags & (1 << 20):
+                if characters == 'c':
+                    self.copy_(None)
+                    return True
+                elif characters == 'v':
+                    self.paste_(None)
+                    return True
+                elif characters == 'x':
+                    self.cut_(None)
+                    return True
+                elif characters == 'a':
+                    self.selectAll_(None)
+                    return True
+        except Exception as e:
+            print(f"Keyboard shortcut error: {e}")
+        # Let parent handle other shortcuts
         return objc.super(CopyableTextView, self).performKeyEquivalent_(event)
     
     def validateUserInterfaceItem_(self, item):
@@ -96,52 +353,80 @@ class CopyableTextView(NSTextView):
         return objc.super(CopyableTextView, self).validateUserInterfaceItem_(item)
     
     def copy_(self, sender):
-        """Explicit copy handler - works with Cmd+C"""
-        selectedRange = self.selectedRange()
-        if selectedRange.length > 0:
-            selectedText = self.string()[selectedRange.location:selectedRange.location + selectedRange.length]
-        else:
-            selectedText = self.string()
-        
-        if selectedText:
-            pasteboard = NSPasteboard.generalPasteboard()
-            pasteboard.clearContents()
-            pasteboard.setString_forType_(selectedText, "public.utf8-plain-text")
-        return True
+        """Handle copy in menu bar context"""
+        try:
+            selectedRange = self.selectedRange()
+            
+            # Get selected text or all text
+            if selectedRange.length > 0:
+                text = self.string()[selectedRange.location:selectedRange.location + selectedRange.length]
+            else:
+                text = self.string()
+            
+            if text:
+                # Access pasteboard directly
+                pasteboard = NSPasteboard.generalPasteboard()
+                pasteboard.clearContents()
+                
+                # Try both type strings for compatibility
+                success = pasteboard.setString_forType_(text, "public.utf8-plain-text")
+                if not success:
+                    pasteboard.setString_forType_(text, "NSStringPboardType")
+                
+                print(f"✅ Copied {len(text)} chars to clipboard")
+                return True
+            else:
+                print("⚠️ No text to copy")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Copy error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def paste_(self, sender):
-        """Explicit paste handler - works with Cmd+V"""
-        if not self.isEditable():
-            return False
-        text = ""
+        """Handle paste in menu bar context - bypasses window responder chain"""
         try:
+            # Get pasteboard directly (works in menu bars)
             pasteboard = NSPasteboard.generalPasteboard()
             text = pasteboard.stringForType_("public.utf8-plain-text")
             
+            if not text:
+                # Try alternate type
+                text = pasteboard.stringForType_("NSStringPboardType")
+            
             if text:
-                # Get current selection
+                # Clear placeholder
+                if getattr(self, '_is_placeholder', False):
+                    self.setString_("")
+                    self._is_placeholder = False
+                
+                # Insert text at cursor position
                 selectedRange = self.selectedRange()
                 
-                # Replace selected text or insert at cursor
-                if self.shouldChangeTextInRange_replacementString_(selectedRange, text):
-                    self.replaceCharactersInRange_withString_(selectedRange, text)
-                    
-                    # Move cursor to end of pasted text
-                    newLocation = selectedRange.location + len(text)
-                    self.setSelectedRange_((newLocation, 0))
-                    
-                    # Notify delegate of change
-                    self.didChangeText()
-                    return True
+                # Use insertText_ which ALWAYS works (even in menus)
+                self.insertText_(text)
+                
+                # Trigger callback
+                try:
+                    cb = getattr(self, 'on_text_change_callback', None)
+                    if cb:
+                        cb()
+                except:
+                    pass
+                
+                print(f"✅ Pasted {len(text)} chars")
+                return True
+            else:
+                print("⚠️ No text in clipboard")
+                return False
+                
         except Exception as e:
-            print(f"Paste error: {e}")
-            # Fallback to simple insert
-            try:
-                self.insertText_(text if text else "")
-            except:
-                pass
-        
-        return False
+            print(f"❌ Paste error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def selectAll_(self, sender):
         """Select all text - works with Cmd+A"""
@@ -164,11 +449,24 @@ class CopyableTextView(NSTextView):
 
 
 class InputTextView(CopyableTextView):
+    def menuForEvent_(self, event):
+        """Show right-click context menu with Copy/Paste/Select All"""
+        menu = NSMenu.alloc().init()
+        # Copy
+        copy_item = menu.addItemWithTitle_action_keyEquivalent_("Copy", "copy:", "")
+        copy_item.setTarget_(self)
+        # Paste
+        paste_item = menu.addItemWithTitle_action_keyEquivalent_("Paste", "paste:", "")
+        paste_item.setTarget_(self)
+        # Select All
+        select_item = menu.addItemWithTitle_action_keyEquivalent_("Select All", "selectAll:", "")
+        select_item.setTarget_(self)
+        return menu
     """Single-line input view based on CopyableTextView for the search bar.
     This shows a caret inside the menu and handles paste/keyboard properly.
     """
     def insertText_(self, text):
-        # Prevent inserting newlines; convert them to spaces
+        """Insert text and FORCE cursor to stay visible"""
         # Clear placeholder when actual text is inserted
         try:
             if getattr(self, '_is_placeholder', False):
@@ -176,10 +474,18 @@ class InputTextView(CopyableTextView):
                 self._is_placeholder = False
         except Exception:
             pass
+        # Prevent inserting newlines; convert them to spaces
         if isinstance(text, str) and '\n' in text:
             text = text.replace('\n', ' ')
         try:
+            # Call parent to insert text
             ret = objc.super(InputTextView, self).insertText_(text)
+            # ⭐ CRITICAL: Force cursor to stay visible after text insertion
+            try:
+                self.updateInsertionPointStateAndRestartTimer_(True)
+                self.setNeedsDisplay_(True)
+            except:
+                pass
             # Invoke text change callback if present
             try:
                 cb = getattr(self, 'on_text_change_callback', None)
@@ -191,6 +497,12 @@ class InputTextView(CopyableTextView):
         except Exception:
             # Fallback - call super on CopyableTextView
             ret = objc.super(CopyableTextView, self).insertText_(text)
+            # ⭐ Force cursor update in fallback too
+            try:
+                self.updateInsertionPointStateAndRestartTimer_(True)
+                self.setNeedsDisplay_(True)
+            except:
+                pass
             try:
                 cb = getattr(self, 'on_text_change_callback', None)
                 if cb:
@@ -249,25 +561,24 @@ class InputTextView(CopyableTextView):
             pass
 
     def paste_(self, sender):
+        """Simplified paste - let parent class handle it"""
         # Clear placeholder before pasting
         try:
             if getattr(self, '_is_placeholder', False):
                 self.setString_("")
                 self._is_placeholder = False
-        except Exception:
+        except:
             pass
-        # Call CopyableTextView.paste_ (parent class) for actual paste behavior
+        # Call parent's paste method (CopyableTextView)
+        result = objc.super(InputTextView, self).paste_(sender)
+        # Trigger callback
         try:
-            ret = CopyableTextView.paste_(self, sender)
-            try:
-                cb = getattr(self, 'on_text_change_callback', None)
-                if cb:
-                    cb()
-            except Exception:
-                pass
-            return ret
-        except Exception:
-            return False
+            cb = getattr(self, 'on_text_change_callback', None)
+            if cb:
+                cb()
+        except:
+            pass
+        return result
 
 
 class CopyableTextField(NSTextField):
@@ -409,77 +720,168 @@ class SynthMenuBarNative(NSObject):
         padding = 10
         inner_width = self.default_width - (padding * 2)  # 480 for default_width 500
         result_view_height = self.default_result_height
+        # Border color used for both the result and input containers
+        border_color = NSColor.colorWithRed_green_blue_alpha_(0.45, 0.45, 0.50, 0.8)
 
         # ============ RESULT VIEW (TOP) - Scrollable output ============
-        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(padding, 115, inner_width, result_view_height))
-        scroll_view.setBorderType_(1)  # Line border
+        # Use NSBox for border, with scroll_view inside
+        border_box = NSBox.alloc().initWithFrame_(NSMakeRect(padding, 130, inner_width, result_view_height))
+        border_box.setBoxType_(4)  # NSBoxCustom
+        border_box.setBorderType_(1)  # NSLineBorder
+        border_box.setBorderWidth_(1.5)
+        border_box.setBorderColor_(border_color)
+        border_box.setCornerRadius_(10.0)
+        border_box.setFillColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 1.0))
+
+        # Create scroll view INSIDE the border box
+        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, inner_width, result_view_height))
+        scroll_view.setBorderType_(0)  # No border
         scroll_view.setDrawsBackground_(True)
+        scroll_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 1.0))
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setHasHorizontalScroller_(False)
-        scroll_view.setAutohidesScrollers_(False)  # ALWAYS show scrollbar
-        scroll_view.setScrollerStyle_(1)  # Overlay style, always visible
-        scroll_view.setVerticalScrollElasticity_(1)  # Allow bounce at top/bottom
+        scroll_view.setAutohidesScrollers_(False)
+        scroll_view.setScrollerStyle_(1)
+        scroll_view.setVerticalScrollElasticity_(1)
         scroll_view.setAutoresizingMask_(2)
 
         # Result text view - READ-ONLY, scrollable
         self.result_view = CopyableTextView.alloc().initWithFrame_(NSMakeRect(0, 0, inner_width - 20, result_view_height))
         self.result_view.setEditable_(False)
         self.result_view.setSelectable_(True)
-        self.result_view.setRichText_(False)  # Disable rich text for performance
-        self.result_view.setFont_(NSFont.fontWithName_size_("Menlo", 12))  # Fixed-width font for speed
-        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.95))
-        self.result_view.setTextColor_(NSColor.whiteColor())
-        self.result_view.setAllowsUndo_(False)
-        
-        # Performance optimizations
+        self.result_view.setRichText_(False)
+        mono_font = NSFont.monospacedSystemFontOfSize_weight_(12, 0)
+        self.result_view.setFont_(mono_font)
         try:
-            self.result_view.setUsesLigatures_(False)  # Disable ligatures for performance
-            self.result_view.setUsesFontPanel_(False)  # Disable font panel
-            self.result_view.setImportsGraphics_(False)  # Disable graphics import
+            text_storage = self.result_view.textStorage()
+            full_range = (0, text_storage.length())
+            text_storage.addAttribute_value_range_("NSFont", mono_font, full_range)
         except:
             pass
-        
+        self.result_view.textContainer().setLineFragmentPadding_(2.0)
+        self.result_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.12, 1.0))
+        self.result_view.setTextColor_(NSColor.whiteColor())
+        self.result_view.setAllowsUndo_(False)
+        self.result_view.setVerticallyResizable_(True)
+        self.result_view.setHorizontallyResizable_(False)
         try:
+            self.result_view.setUsesFontPanel_(False)
+            self.result_view.setUsesLigatures_(False)
+            self.result_view.setImportsGraphics_(False)
             self.result_view.setAutomaticTextReplacementEnabled_(False)
             self.result_view.setAutomaticQuoteSubstitutionEnabled_(False)
+        except:
+            pass
+        try:
             self.result_view.setAutomaticDashSubstitutionEnabled_(False)
             self.result_view.setAutomaticSpellingCorrectionEnabled_(False)
             self.result_view.setGrammarCheckingEnabled_(False)
-            self.result_view.setAutomaticSpellingCorrectionEnabled_(False)
         except:
             pass
         try:
-            # Word wrap
             self.result_view.textContainer().setWidthTracksTextView_(True)
             self.result_view.textContainer().setContainerSize_(NSMakeSize(inner_width - 20, 10000000))
-            self.result_view.textContainer().setLineFragmentPadding_(8.0)
         except:
             pass
+        # Add bottom padding so last line is visible
+        self.result_view.setTextContainerInset_(NSMakeSize(5, 15))  # 5px horizontal, 15px bottom padding
         scroll_view.setDocumentView_(self.result_view)
+        border_box.setContentView_(scroll_view)
         self.scroll_view = scroll_view
+        self.scroll_border_box = border_box
 
         # ============ INPUT TEXT VIEW (MIDDLE) - Editable, direct view (NO scroll wrapper) ============
-        # CRITICAL FIX: Input view should NOT be wrapped in NSScrollView
-        # NSScrollView blocks focus and keyboard events for input fields
-        # Create InputTextView DIRECTLY with proper frame
-        
-        self.input_text_view = InputTextView.alloc().initWithFrame_(NSMakeRect(padding, 60, inner_width, 40))
+        input_container_height = 50
+        input_container_y = 65
+        input_container = NSView.alloc().initWithFrame_(NSMakeRect(padding, input_container_y, inner_width, input_container_height))
+        input_container.setWantsLayer_(True)
+        try:
+            input_container.layer().setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.17, 1.0).CGColor())
+            input_container.layer().setBorderWidth_(1.5)
+            input_container.layer().setBorderColor_(border_color.CGColor())
+            input_container.layer().setCornerRadius_(10.0)
+            input_container.layer().setMasksToBounds_(True)
+        except:
+            pass
+        input_padding = 8
+        self.input_text_view = InputTextView.alloc().initWithFrame_(NSMakeRect(input_padding, input_padding, inner_width - (input_padding * 2), input_container_height - (input_padding * 2)))
         self.input_text_view.setEditable_(True)
         self.input_text_view.setSelectable_(True)
         self.input_text_view.setRichText_(False)
-        self.input_text_view.setFont_(NSFont.systemFontOfSize_(14))
-        self.input_text_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.16, 0.18, 0.98))
+        self.input_text_view.setFont_(NSFont.fontWithName_size_("Menlo", 13))
+        self.input_text_view.setBackgroundColor_(NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.17, 1.0))
         self.input_text_view.setTextColor_(NSColor.whiteColor())
-        self.input_text_view.setInsertionPointColor_(NSColor.whiteColor())  # White cursor!
-        
-        # Border styling
-        self.input_text_view.setWantsLayer_(True)
+        self.input_text_view.setInsertionPointColor_(NSColor.whiteColor())
         try:
-            self.input_text_view.layer().setBorderWidth_(1.0)
-            self.input_text_view.layer().setBorderColor_(NSColor.colorWithRed_green_blue_alpha_(0.3, 0.3, 0.35, 1.0).CGColor())
-            self.input_text_view.layer().setCornerRadius_(4.0)
+            self.input_text_view.setInsertionPointWidth_(3.0)
         except:
             pass
+        self.input_text_view.setDrawsBackground_(True)
+        try:
+            self.input_text_view.setAutomaticTextReplacementEnabled_(False)
+            self.input_text_view.setAutomaticQuoteSubstitutionEnabled_(False)
+        except:
+            pass
+        try:
+            self.input_text_view.textContainer().setWidthTracksTextView_(True)
+            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(inner_width - 20, 10000000))
+            self.input_text_view.textContainer().setLineFragmentPadding_(4.0)
+        except:
+            pass
+        self.input_text_view.setPlaceholder_("Ask Synth anything...")
+        self.input_text_view.on_enter_callback = self.handleInputEnter
+        input_container.addSubview_(self.input_text_view)
+        self.input_container = input_container
+
+        def handleQuery_(self, sender):
+            """Handle ASK button - Fast intelligent agent with Live Tools"""
+            query = str(self.input_text_view.string()).strip()
+            if not query:
+                return
+            self.scroll_border_box.setHidden_(False)
+            self.expand_view_for_content(100)
+            self.safe_update_result("💭 Analyzing query...")
+            import threading, time, traceback
+            def process_in_background():
+                from utils.ask_button_logger import get_logger
+                logger = get_logger()
+                start_time = time.time()
+                logger.log_query(query)
+                try:
+                    clipboard_text = self.get_recent_clipboard_text()
+                    if clipboard_text:
+                        logger.log_event("CLIPBOARD_CONTEXT", {"length": len(clipboard_text)})
+                        self.safe_update_result(f"� Using clipboard ({len(clipboard_text)} chars) | 🤖 Processing...")
+                    from src.brain.agent_modes import ask_mode_agent
+                    def log_event_callback(event_type, data):
+                        logger.log_event(event_type, data)
+                    response = ask_mode_agent(
+                        query,
+                        clipboard_text=None,
+                        progress_callback=lambda msg: self.safe_update_result(msg),
+                        log_callback=log_event_callback
+                    )
+                    total_time = time.time() - start_time
+                    logger.log_response(response)
+                    logger.log_timing("total", total_time)
+                    self.safe_update_result(response + f"\n\n⏱️ Completed in {total_time:.1f}s")
+                    print(f"✅ Ask mode completed in {total_time:.1f}s")
+                except Exception as e:
+                    error_msg = str(e)
+                    tb = traceback.format_exc()
+                    logger.log_error(error_msg, tb)
+                    total_time = time.time() - start_time
+                    logger.log_timing("total_failed", total_time)
+                    friendly_error = f"""❌ Error: {error_msg[:200]}
+
+    Something went wrong. Please try again or rephrase your question.
+
+    Log file: logs/ask_button/ask_session_*.log"""
+                    self.safe_update_result(friendly_error)
+                    print(f"❌ Error:\n{tb}")
+            thread = threading.Thread(target=process_in_background)
+            thread.daemon = True
+            thread.start()
         
         try:
             self.input_text_view.setAutomaticTextReplacementEnabled_(False)
@@ -490,8 +892,8 @@ class SynthMenuBarNative(NSObject):
         try:
             # Word wrap for input
             self.input_text_view.textContainer().setWidthTracksTextView_(True)
-            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(inner_width, 10000000))
-            self.input_text_view.textContainer().setLineFragmentPadding_(8.0)
+            self.input_text_view.textContainer().setContainerSize_(NSMakeSize(inner_width - 20, 10000000))  # Match result_view width
+            self.input_text_view.textContainer().setLineFragmentPadding_(4.0)  # Balanced spacing
         except:
             pass
         
@@ -500,6 +902,25 @@ class SynthMenuBarNative(NSObject):
         
         # Set callback for Enter key
         self.input_text_view.on_enter_callback = self.handleInputEnter
+        
+        # Add input to container
+        input_container.addSubview_(self.input_text_view)
+        # Ensure input is editable and selectable
+        self.input_text_view.setEditable_(True)
+        self.input_text_view.setSelectable_(True)
+        # Enable standard edit menu and proper text handling
+        self.input_text_view.setUsesFontPanel_(True)  # Allow font changes
+        self.input_text_view.setRichText_(False)  # Keep plain text
+        # ⭐ CRITICAL: Enable automatic menu items for copy/paste
+        try:
+            self.input_text_view.setAutomaticTextCompletionEnabled_(False)
+            self.input_text_view.setAutomaticLinkDetectionEnabled_(False)
+        except:
+            pass
+        # Force acceptsFirstResponder to always return True
+        def custom_accepts_first_responder():
+            return True
+        self.input_text_view.acceptsFirstResponder = custom_accepts_first_responder
 
         # ============ 5 BUTTONS (ROW 1) ============
         btn_spacing = 6
@@ -557,17 +978,17 @@ class SynthMenuBarNative(NSObject):
         self.chat_button.setFont_(NSFont.systemFontOfSize_(11))
         
         # Add all views
-        self.input_view.addSubview_(scroll_view)
-        self.input_view.addSubview_(self.input_text_view)  # Direct view, no scroll wrapper!
+        self.input_view.addSubview_(border_box)
+        self.input_view.addSubview_(input_container)
         self.input_view.addSubview_(self.ask_button)
         self.input_view.addSubview_(self.agent_button)
         self.input_view.addSubview_(self.screen_button)
         self.input_view.addSubview_(self.copy_button)
         self.input_view.addSubview_(self.clear_button)
         self.input_view.addSubview_(self.chat_button)
-        
+
         # Hidden by default
-        self.scroll_view.setHidden_(True)
+        self.scroll_border_box.setHidden_(True)
     
     def build_menu(self):
         """Build menu with embedded input view and settings"""
@@ -659,19 +1080,28 @@ class SynthMenuBarNative(NSObject):
         try:
             window = self.input_text_view.window()
             if window is not None:
-                window.makeFirstResponder_(self.input_text_view)
-                # Set cursor to end
-                try:
-                    text_length = len(str(self.input_text_view.string()))
-                    self.input_text_view.setSelectedRange_((text_length, 0))
-                except Exception:
-                    pass
+                # CRITICAL: Make window key FIRST
+                window.makeKeyAndOrderFront_(None)
+                # Then make input first responder
+                success = window.makeFirstResponder_(self.input_text_view)
+                if success:
+                    # Move cursor to end
+                    try:
+                        text_length = len(str(self.input_text_view.string()))
+                        self.input_text_view.setSelectedRange_((text_length, 0))
+                        print("✅ Input view is first responder")
+                    except Exception:
+                        pass
+                else:
+                    print("⚠️ Failed to make input view first responder")
+                    # Force it anyway
+                    self.input_text_view.becomeFirstResponder()
         except Exception as exc:
             print(f"⚠️ Unable to focus input view: {exc}")
 
     def reset_to_compact_view(self):
         """Hide result pane and shrink container back to compact height."""
-        self.scroll_view.setHidden_(True)
+        self.scroll_border_box.setHidden_(True)
         self.current_result_height = 0
         self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, self.compact_height))
     
@@ -695,18 +1125,18 @@ Type your request in the text field above and click Ask to use this plugin!
 The plugin will automatically activate when relevant to your query."""
             
             self.safe_update_result(info)
-            self.scroll_view.setHidden_(False)
+            self.scroll_border_box.setHidden_(False)
             self.expand_view_for_content(200)
         else:
             self.safe_update_result(f"❌ Plugin '{plugin_name}' not found")
     
     def clearResults_(self, sender):
-        """Clear the result area and reset view - also clear the input!"""
+        """Clear the result area and reset view - but keep input text!"""
         # Clear result area
         self.result_view.setString_("")
         
-        # Clear the input text view
-        self.input_text_view.setString_("")
+        # DON'T clear input - let user edit or reuse it!
+        # self.input_text_view.setString_("")  # REMOVED - keep text for editing
         self.input_text_view.setEditable_(True)
         
         # RESET CLIPBOARD STATE - user must do Cmd+C again to capture new text
@@ -719,7 +1149,7 @@ The plugin will automatically activate when relevant to your query."""
         # Show appropriate message based on mode
         if self.chat_mode_active:
             self.safe_update_result("💬 Chat Mode Active\n\nConversation cleared. Start a new conversation...")
-            self.scroll_view.setHidden_(False)
+            self.scroll_border_box.setHidden_(False)
             self.expand_view_for_content(100)
         else:
             print("🔄 Cleared: Clipboard, Results, and Chat History")
@@ -955,10 +1385,10 @@ The plugin will automatically activate when relevant to your query."""
     def handleInputEnter(self):
         """Handle Enter key in input text view - routes based on chat mode"""
         if self.chat_mode_active:
-            # In chat mode: Enter sends message
+            # In chat mode: Enter sends message AND CLEARS INPUT
             self.handleChat_(None)
         else:
-            # Normal mode: Enter triggers Ask button
+            # Normal mode: Enter triggers Ask button (input stays for editing)
             self.handleQuery_(None)
     
     
@@ -1057,18 +1487,25 @@ Use the buttons below for:
             self.analyze_screen_with_query(query)
     
     def handleChat_(self, sender):
-        """Handle CHAT in chat mode - Conversational AI with context memory and auto web search"""
+        """Handle CHAT in chat mode - Same as ASK but with conversation memory
+        
+        CHAT MODE = ASK MODE + CONVERSATION CONTEXT
+        - Uses all tools (weather, web search, definitions, etc.)
+        - Intelligent routing via ask_mode_agent
+        - Remembers previous conversation
+        - Logs to logs/chat_button/
+        """
         query = str(self.input_text_view.string()).strip()
         
         if not query:
             # Show conversation history if no input
             conversation = self.chat_manager.get_full_conversation()
             self.safe_update_result(conversation)
-            self.scroll_view.setHidden_(False)
+            self.scroll_border_box.setHidden_(False)
             self.expand_view_for_content(300)
             return
         
-        # Clear input immediately
+        # CHAT MODE: Clear input immediately so user can type next message
         self.input_text_view.setString_("")
         
         # Show result area
@@ -1082,177 +1519,108 @@ Use the buttons below for:
         # Show immediate progress
         current_time = datetime.now().strftime("%I:%M:%S %p")
         loading_msg = f"💬 Chat Mode\n\n[{current_time}] 👤 You:\n{query}\n\n"
-        self.safe_update_result(loading_msg + "💭 Processing your question...")
+        self.safe_update_result(loading_msg + "💭 Processing...")
         
         import threading
         import time as time_module
         
         def process_chat():
-            try:
-                from datetime import datetime
-                
-                # Enhanced keyword detection for web search
-                query_lower = query.lower()
-                current_event_keywords = [
-                    'latest', 'news', 'polls', 'election', 'today', 'recent', 
-                    '2025', '2024', 'current', 'now', 'this week', 'this month',
-                    'trending', 'breaking', 'update', 'new', 'what is happening',
-                    'tell me about', 'bihar', 'canada', 'immigration', 'politics'
-                ]
-                
-                needs_web_search = any(keyword in query_lower for keyword in current_event_keywords)
-                
-                web_context = ""
-                sources_text = ""
-                
-                # Automatic web search if needed - WITH VERIFICATION
-                if needs_web_search:
-                    try:
-                        self.safe_update_result(loading_msg + "🔍 Searching web for latest information...")
-                        time_module.sleep(0.2)  # Let user see progress
-                        
-                        print(f"🔍 Web search triggered for: {query}")
-                        
-                        # Search web
-                        search_results = self.web_search.search(query, include_news=True)
-                        
-                        print(f"📊 Web search found: {search_results['sources_count']} sources")
-                        
-                        if search_results['sources_count'] > 0:
-                            # Build web context with STRONG emphasis on recency
-                            web_context = f"\n\nCRITICAL: Answer ONLY using these web search results from November 2025:\n\n"
-                            web_context += f"WEB SEARCH RESULTS ({search_results['sources_count']} sources from November 2025):\n"
-                            web_context += search_results['context'][:4000]  # First 4000 chars
-                            
-                            # Prepare sources for display
-                            sources_text = "\n\n📚 Sources:\n"
-                            for i, res in enumerate(search_results['results'][:5], 1):
-                                sources_text += f"{i}. {res.title}\n   {res.source}\n"
-                            
-                            self.safe_update_result(loading_msg + f"🔍 Found {search_results['sources_count']} sources | 🤖 Generating answer...")
-                            time_module.sleep(0.2)
-                        else:
-                            print("⚠️ No web sources found, using AI knowledge")
-                    except Exception as e:
-                        print(f"⚠️ Web search failed: {e}")
-                        # Continue without web search
-                
-                # Get conversation context (AFTER web results for lower priority)
-                context = self.chat_manager.get_context(last_n=10)
-                
-                # Build comprehensive prompt - WEB RESULTS FIRST for highest priority
-                current_time = datetime.now().strftime("%I:%M %p")
-                current_date = datetime.now().strftime("%B %d, %Y")
-                
-                # CRITICAL: Put date and web results at TOP of prompt
-                prompt = f"""CURRENT DATE: {current_date}
-CURRENT TIME: {current_time}
-
-YOU MUST use the web search results dated November 2025 below.
-If the question is about anything look for latest news or articles.
-{web_context}
-
-CONVERSATION HISTORY:
-{context}
-
-CURRENT DATE (REMINDER): {current_date}
-
-👤 User:
-{query}
-
-🤖 Synth:
-Base your answer on the November 2025 web results above.
-Respond naturally and conversationally. Remember the context from earlier messages.
-{"CRITICAL: Use ONLY the November 2025 web search results. Ignore any outdated information about the topic." if web_context else ""}
-Keep your response concise but complete (aim for 200-400 words).
-Answer in ENGLISH ONLY."""
-                
-                # Use general_chat for conversational response - WITH ERROR HANDLING
+            from datetime import datetime
+            import json
+            import os
+            import traceback
+            
+            # Create chat log directory
+            log_dir = "logs/chat_button"
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # Create session log file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = os.path.join(log_dir, f"chat_session_{timestamp}.log")
+            
+            def log_event(event: str, data: dict):
+                """Log events to file"""
                 try:
-                    from src.brain.tools_gemini import general_chat
-                    response = general_chat(prompt)
-                    
-                    # Clean up response (remove 🤖 prefix if present)
-                    response = response.strip()
-                    if response.startswith("🤖"):
-                        response = response[1:].strip()
-                    
-                except Exception as api_error:
-                    error_str = str(api_error).lower()
-                    # Check for quota/rate limit errors
-                    if any(keyword in error_str for keyword in ['quota', '429', 'resource_exhausted', 'rate limit']):
-                        response = f"""⚠️ API Quota Exceeded
-
-The Gemini API has hit its daily quota limit (200 requests/day on free tier).
-
-**What you can do:**
-1. Wait 1 hour and try again
-2. Upgrade to a paid plan for higher limits
-3. Use the Ask or Agent buttons (they may have quota left)
-
-Your conversation history is preserved. The quota resets in approximately 1 hour."""
-                        print(f"❌ API Quota Error: {api_error}")
-                    elif 'timeout' in error_str:
-                        response = "⚠️ Request timed out. Please try a shorter question or check your internet connection."
-                        print(f"❌ Timeout Error: {api_error}")
-                    elif 'network' in error_str or 'connection' in error_str:
-                        response = "⚠️ Cannot connect to AI service. Please check your internet connection and try again."
-                        print(f"❌ Network Error: {api_error}")
-                    else:
-                        # Generic error with first 200 chars
-                        error_preview = str(api_error)[:200]
-                        response = f"❌ Error: {error_preview}\n\nPlease try again or use a different question."
-                        print(f"❌ API Error: {api_error}")
+                    with open(log_file, 'a') as f:
+                        entry = {
+                            "timestamp": datetime.now().isoformat(),
+                            "event": event,
+                            "data": data
+                        }
+                        f.write(json.dumps(entry) + "\n")
+                except Exception as e:
+                    print(f"⚠️ Logging error: {e}")
+            
+            try:
+                # Log session start
+                log_event("SESSION_START", {"timestamp": datetime.now().isoformat()})
+                log_event("QUERY", {"query": query})
+                
+                # Get conversation context (last 10 messages for efficiency)
+                context = self.chat_manager.get_context(last_n=10)
+                log_event("CONVERSATION_CONTEXT", {"length": len(context)})
+                
+                # Import ask_mode_agent function
+                from src.brain.agent_modes import ask_mode_agent
+                
+                # Use ask_mode_agent with ORIGINAL query for routing
+                # Context is stored in chat history, not needed for tool selection
+                print(f"💬 Chat mode - routing with original query: {query}")
+                
+                # Progress callback
+                def progress_cb(msg):
+                    self.safe_update_result(loading_msg + msg)
+                    print(f"📊 {msg}")
+                
+                # Logging callback
+                def log_cb(event, data):
+                    log_event(event, data)
+                    if event == "TOOL_SELECTED":
+                        print(f"🔧 Tool: {data.get('tool_name', 'unknown')}")
+                
+                response = ask_mode_agent(
+                    query,  # Use ORIGINAL query for proper tool routing!
+                    None,  # No clipboard for chat mode
+                    progress_cb,
+                    log_cb
+                )
+                
+                # Clean up response
+                response = response.strip()
+                if response.startswith("🤖"):
+                    response = response[1:].strip()
                 
                 # Add assistant response to history
                 self.chat_manager.add_message('assistant', response)
+                log_event("RESPONSE", {
+                    "response_length": len(response),
+                    "response_preview": response[:200]
+                })
                 
-                # Build full conversation display (OPTIMIZED - last 20 messages only)
-                conversation_display = "💬 Chat Mode - Conversation\n\n"
+                # Build conversation display (last 20 messages)
+                conversation_display = "💬 Chat Mode\n\n"
                 
-                # Get messages (limit to last 20 for performance)
                 messages_to_show = self.chat_manager.messages[-20:] if len(self.chat_manager.messages) > 20 else self.chat_manager.messages
                 
                 if len(self.chat_manager.messages) > 20:
                     conversation_display += f"(Showing last 20 of {len(self.chat_manager.messages)} messages)\n\n"
                 
-                # Show messages with timestamps (efficient string building)
-                message_parts = []
+                # Build conversation
                 for msg in messages_to_show:
                     time_str = msg.timestamp.strftime("%I:%M:%S %p")
                     if msg.role == 'user':
-                        message_parts.append(f"[{time_str}] 👤 You:\n{msg.content}\n\n")
+                        conversation_display += f"[{time_str}] 👤 You:\n{msg.content}\n\n"
                     else:
-                        message_parts.append(f"[{time_str}] 🤖 Synth:\n{msg.content}\n\n")
+                        conversation_display += f"[{time_str}] 🤖 Synth:\n{msg.content}\n\n"
                 
-                conversation_display += ''.join(message_parts)
-                
-                # Add sources if web search was used
-                if sources_text:
-                    conversation_display += sources_text
-                
-                # Display full conversation (with size limit for performance)
-                if len(conversation_display) > 50000:  # 50KB limit
-                    conversation_display = conversation_display[-50000:]
-                    conversation_display = "...(conversation truncated)\n\n" + conversation_display
-                
+                # Display
                 self.safe_update_result(conversation_display)
                 
-                # CRITICAL: Auto-scroll to bottom in chat mode
-                # Use small delay to ensure text is rendered first
-                import time as time_module2
-                time_module2.sleep(0.1)
+                # Log timing
+                log_event("TIMING", {"stage": "total", "message": "Chat completed"})
                 
-                # Force scroll to bottom - show latest message
-                try:
-                    self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                        "forceScrollToBottom:", None, False
-                    )
-                except:
-                    pass
-                
-                # Second scroll attempt after another delay for reliability
-                time_module2.sleep(0.1)
+                # Single scroll to bottom after display
+                time_module.sleep(0.05)
                 try:
                     self.performSelectorOnMainThread_withObject_waitUntilDone_(
                         "forceScrollToBottom:", None, False
@@ -1261,10 +1629,8 @@ Your conversation history is preserved. The quota resets in approximately 1 hour
                     pass
                 
             except Exception as e:
-                import traceback
-                error_msg = f"❌ Chat Error: {str(e)[:200]}\n\nPlease try again. Your conversation history is preserved."
+                error_msg = f"❌ Chat Error: {str(e)[:200]}\n\nPlease try again."
                 
-                # Keep conversation visible above error
                 try:
                     current_conversation = self.chat_manager.get_full_conversation()
                     error_msg = current_conversation + "\n\n" + error_msg
@@ -1273,6 +1639,9 @@ Your conversation history is preserved. The quota resets in approximately 1 hour
                 
                 self.safe_update_result(error_msg)
                 print(f"❌ Full error:\n{traceback.format_exc()}")
+                
+                # Log error
+                log_event("ERROR", {"error": str(e), "traceback": traceback.format_exc()})
         
         # Run in background
         thread = threading.Thread(target=process_chat)
@@ -1289,15 +1658,14 @@ Your conversation history is preserved. The quota resets in approximately 1 hour
         - Full logging to logs/ask_button/ask_session_TIMESTAMP.log
         """
         query = str(self.input_text_view.string()).strip()
-
         if not query:
             return
 
-        # Clear input immediately
-        self.input_text_view.setString_("")
+        # DON'T clear input - let user see and edit it!
+        # self.input_text_view.setString_("")  # REMOVED - keep text for editing
 
         # Show result area
-        self.scroll_view.setHidden_(False)
+        self.scroll_border_box.setHidden_(False)
         self.expand_view_for_content(100)
 
         # Show loading immediately
@@ -1313,45 +1681,50 @@ Your conversation history is preserved. The quota resets in approximately 1 hour
             # ═══════════════════════════════════════════════════════════
             from utils.ask_button_logger import get_logger
             logger = get_logger()
-            
+
             start_time = time.time()
             logger.log_query(query)
-            
+
             try:
                 # ═══════════════════════════════════════════════════════════
                 # STEP 2: Get Context (clipboard if available)
                 # ═══════════════════════════════════════════════════════════
                 clipboard_text = self.get_recent_clipboard_text()
-                
+
                 if clipboard_text:
                     logger.log_event("CLIPBOARD_CONTEXT", {"length": len(clipboard_text)})
                     self.safe_update_result(f"� Using clipboard ({len(clipboard_text)} chars) | 🤖 Processing...")
-                
+
                 # ═══════════════════════════════════════════════════════════
                 # STEP 3: Execute Agent (replaces all routing logic)
                 # ═══════════════════════════════════════════════════════════
                 from src.brain.agent_modes import ask_mode_agent
-                
+
+                # Define log callback for detailed events
+                def log_event_callback(event_type, data):
+                    logger.log_event(event_type, data)
+
                 response = ask_mode_agent(
-                    query, 
-                    clipboard_text=clipboard_text,
-                    progress_callback=lambda msg: self.safe_update_result(msg)
+                    query,
+                    clipboard_text=None,  # ASK MODE = NO MEMORY!
+                    progress_callback=lambda msg: self.safe_update_result(msg),
+                    log_callback=log_event_callback  # NEW: Detailed logging!
                 )
-                
+
                 # ═══════════════════════════════════════════════════════════
                 # STEP 4: Log Success
                 # ═══════════════════════════════════════════════════════════
                 total_time = time.time() - start_time
-                
+
                 logger.log_response(response)
                 logger.log_timing("total", total_time)
-                
+
                 # ═══════════════════════════════════════════════════════════
                 # STEP 5: Update UI
                 # ═══════════════════════════════════════════════════════════
                 self.safe_update_result(response + f"\n\n⏱️ Completed in {total_time:.1f}s")
                 print(f"✅ Ask mode completed in {total_time:.1f}s")
-                
+
             except Exception as e:
                 # ═══════════════════════════════════════════════════════════
                 # STEP 6: Error Handling (preserve logging)
@@ -1359,19 +1732,19 @@ Your conversation history is preserved. The quota resets in approximately 1 hour
                 error_msg = str(e)
                 tb = traceback.format_exc()
                 logger.log_error(error_msg, tb)
-                
+
                 total_time = time.time() - start_time
                 logger.log_timing("total_failed", total_time)
-                
+
                 friendly_error = f"""❌ Error: {error_msg[:200]}
 
 Something went wrong. Please try again or rephrase your question.
 
 Log file: logs/ask_button/ask_session_*.log"""
-                
+
                 self.safe_update_result(friendly_error)
                 print(f"❌ Error:\n{tb}")
-        
+
         # Run in background thread so Mac doesn't freeze
         thread = threading.Thread(target=process_in_background)
         thread.daemon = True
@@ -1384,11 +1757,11 @@ Log file: logs/ask_button/ask_session_*.log"""
         if not query:
             return
 
-        # Clear input immediately
-        self.input_text_view.setString_("")
+        # DON'T clear input - let user see and edit it!
+        # self.input_text_view.setString_("")  # REMOVED - keep text for editing
 
         # Show result area
-        self.scroll_view.setHidden_(False)
+        self.scroll_border_box.setHidden_(False)
         self.expand_view_for_content(100)
 
         # Show loading immediately
@@ -1427,8 +1800,8 @@ Log file: logs/ask_button/ask_session_*.log"""
         self.current_result_height = result_height
         
         # Resize scroll view (result area)
-        self.scroll_view.setHidden_(False)
-        self.scroll_view.setFrame_(NSMakeRect(10, 65, 480, result_height))
+        self.scroll_border_box.setHidden_(False)
+        self.scroll_border_box.setFrame_(NSMakeRect(10, 65, 480, result_height))
         
         # Resize container
         self.input_view.setFrame_(NSMakeRect(0, 0, self.default_width, new_total_height))
@@ -1842,53 +2215,64 @@ ANSWER:"""
         """Update result view on the main thread (selector method - note the trailing underscore)."""
         try:
             self.result_view.setString_(text)
-            
-            # Force layout update BEFORE scrolling
-            self.result_view.setNeedsDisplay_(True)
-            
+            # ⭐ FORCE MONOSPACE FONT AFTER TEXT UPDATE ⭐
+            mono_font = NSFont.monospacedSystemFontOfSize_weight_(12, 0)
+            try:
+                text_storage = self.result_view.textStorage()
+                full_range = (0, text_storage.length())
+                text_storage.addAttribute_value_range_("NSFont", mono_font, full_range)
+            except:
+                pass
             # Calculate height based on text length (optimized for longer content)
             line_count = text.count('\n') + 1
             # Allow more room for longer text, max 700px for scrolling
             text_height = max(80, min(700, line_count * 18 + 40))
             self.expand_view_for_content(text_height)
-            
-            # Small delay to allow text to render, then scroll
-            import time
-            time.sleep(0.05)
-            
-            # FORCE scroll to bottom after text update - FIXED MATH!
+            # CRITICAL: Force immediate layout calculation BEFORE scrolling
+            # This prevents the "lag" where scroll happens before height calculation
+            self.result_view.layoutManager().ensureLayoutForTextContainer_(self.result_view.textContainer())
+            # FORCE scroll to bottom after text update - scroll PAST the end
             text_length = len(str(self.result_view.string()))
             if text_length > 0:
-                # Scroll to LAST character (text_length, 0) not (text_length - 1, 0)!
-                self.result_view.scrollRangeToVisible_((text_length, 0))
-                
-                # Flash scrollbar to make it visible
-                try:
-                    self.scroll_view.flashScrollers()
-                except:
-                    pass
+                # Scroll past the end to ensure we're at the very bottom
+                self.result_view.scrollRangeToVisible_((text_length + 100, 0))
         except Exception:
             pass
     
     def scrollToBottom_(self, _):
         """Scroll result view to bottom (for chat mode)"""
         try:
-            # Scroll to the end of the text - FIXED MATH
+            # Force layout calculation first
+            self.result_view.layoutManager().ensureLayoutForTextContainer_(self.result_view.textContainer())
+
+            # Enhanced: Scroll past the very end with extra 200 char buffer
             text_length = len(str(self.result_view.string()))
             if text_length > 0:
-                # Use text_length (last position), NOT text_length - 1!
-                self.result_view.scrollRangeToVisible_((text_length, 0))
+                self.result_view.scrollRangeToVisible_((text_length + 200, 0))
+
+                # Also scroll to visible point at the absolute bottom
+                try:
+                    layout_manager = self.result_view.layoutManager()
+                    text_container = self.result_view.textContainer()
+                    glyph_range = layout_manager.glyphRangeForTextContainer_(text_container)
+                    rect = layout_manager.boundingRectForGlyphRange_inTextContainer_(glyph_range, text_container)
+                    self.result_view.scrollPoint_((0, rect.size.height))  # Scroll to max height
+                except Exception:
+                    pass
         except Exception:
             pass
     
     def forceScrollToBottom_(self, _):
         """FORCE scroll to bottom with scrollbar flash"""
         try:
+            # Force layout calculation BEFORE scrolling
+            self.result_view.layoutManager().ensureLayoutForTextContainer_(self.result_view.textContainer())
+            
             # Get text length
             text_length = len(str(self.result_view.string()))
             if text_length > 0:
-                # Scroll to very end - FIXED: Use text_length NOT text_length - 1
-                self.result_view.scrollRangeToVisible_((text_length, 0))
+                # Scroll past very end to ensure absolute bottom
+                self.result_view.scrollRangeToVisible_((text_length + 100, 0))
                 
                 # Flash scrollers to make them visible
                 try:
@@ -2001,6 +2385,11 @@ Respond directly to their request:"""
         thread.daemon = True
         thread.start()
     
+    def applicationWillTerminate_(self, notification):
+        """Called when the app is about to quit - ensure tunnel cleanup"""
+        print("\n⚠️  Application terminating - Cleaning up SSH tunnel...")
+        cleanup_tunnel()
+    
     def show_notification(self, title, subtitle, message):
         """Show macOS notification"""
         notification = NSUserNotification.alloc().init()
@@ -2017,10 +2406,35 @@ Respond directly to their request:"""
 # (Don't assign the class to Any - use getattr on the class instead when calling dynamic Objective-C alloc/init.)
 
 
+def signal_handler(signum, frame):
+    """Handle termination signals (SIGTERM, SIGINT) to ensure cleanup"""
+    print(f"\n⚠️  Received signal {signum} - Cleaning up before exit...")
+    cleanup_tunnel()
+    sys.exit(0)
+
+
 def main():
     """Main entry point"""
     print("🚀 Starting Synth Menu Bar (Native)...")
     
+    # ═══════════════════════════════════════════════════════════
+    # STEP 1: Register Signal Handlers (CRITICAL for menu bar apps!)
+    # ═══════════════════════════════════════════════════════════
+    # These catch Cmd+Q, kill, and Ctrl+C to ensure cleanup
+    signal.signal(signal.SIGTERM, signal_handler)  # Cmd+Q, kill
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    atexit.register(cleanup_tunnel)                # Python exit (backup)
+    print("✅ Signal handlers registered (tunnel will auto-close on ANY exit)\n")
+    
+    # ═══════════════════════════════════════════════════════════
+    # STEP 2: Start SSH Tunnel to Delta Brain
+    # ═══════════════════════════════════════════════════════════
+    print("🔌 Initializing Delta Brain Connection...")
+    start_ssh_tunnel()
+    
+    # ═══════════════════════════════════════════════════════════
+    # STEP 3: Configure Application
+    # ═══════════════════════════════════════════════════════════
     # Config - show Gemini fallback status
     from dotenv import load_dotenv
     load_dotenv()
@@ -2030,14 +2444,32 @@ def main():
     print(f"🔧 Gemini fallback models: {fb}")
     print(f"🔧 Gemini free-tier-only set: {free_only}")
 
+    # ═══════════════════════════════════════════════════════════
+    # STEP 4: Create and Run Application
+    # ═══════════════════════════════════════════════════════════
     # Create app
     app = NSApplication.sharedApplication()
     
     # Create menu bar
     synth = getattr(SynthMenuBarNative, 'alloc')().init()
     
+    # Register synth as app delegate to receive applicationWillTerminate_
+    app.setDelegate_(synth)
+    
     # Run app
-    app.run()
+    print("\n✅ Application ready - SSH tunnel active")
+    print("   Press Cmd+Q or Ctrl+C to quit (tunnel will auto-close)")
+    print("="*60 + "\n")
+    
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        print("\n⚠️  Keyboard interrupt - Cleaning up...")
+        cleanup_tunnel()
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        cleanup_tunnel()
+        raise
 
 
 if __name__ == "__main__":

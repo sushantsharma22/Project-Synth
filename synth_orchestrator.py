@@ -17,7 +17,7 @@ from datetime import datetime
 
 from src.senses.clipboard_monitor import ClipboardMonitor
 from src.senses.screen_capture import ScreenCapture
-from src.brain.brain_api_client import BrainAPIClient
+from brain_client import DeltaBrain
 from src.hands.action_executors import ActionExecutorFactory
 
 # Configure logging
@@ -52,7 +52,7 @@ class SynthOrchestrator:
         # Components
         self.clipboard_monitor: Optional[ClipboardMonitor] = None
         self.screen_capture: Optional[ScreenCapture] = None
-        self.brain: Optional[BrainAPIClient] = None
+        self.brain: Optional[DeltaBrain] = None
         
         # Statistics
         self.stats = {
@@ -138,7 +138,7 @@ class SynthOrchestrator:
     def _init_components(self):
         """Initialize all components."""
         # Initialize Brain
-        self.brain = BrainAPIClient()
+        self.brain = DeltaBrain()
         logger.info("🧠 Brain initialized")
         
         # Initialize Clipboard Monitor
